@@ -1,0 +1,543 @@
+/* Screens added for the platform version: sign-in, account menu, Team page, contacts, history.
+   Built from the same tokens as fluidcrm.css. */
+
+/* ---------- sign-in / no access ---------- */
+
+.auth-page {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 24px 16px;
+  background: var(--bg);
+}
+
+.auth-card {
+  width: 100%;
+  max-width: 380px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 28px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  box-shadow: 0 10px 30px rgba(17, 24, 39, 0.06);
+}
+
+.auth-brand {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 6px;
+}
+
+.auth-title {
+  font-size: 18px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+
+.auth-sub {
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+.auth-submit {
+  justify-content: center;
+  width: 100%;
+  margin-top: 4px;
+}
+
+.auth-note {
+  margin: 0;
+  font-size: 13px;
+  color: var(--text-muted);
+  text-align: center;
+}
+
+.auth-note-left {
+  text-align: left;
+  line-height: 1.5;
+}
+
+/* ---------- account menu ---------- */
+
+.account-btn {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: 40px;
+  padding: 0 8px 0 4px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+  color: var(--text-muted);
+}
+
+.account-btn:hover,
+.account-btn.is-on {
+  border-color: var(--border-strong);
+  color: var(--text);
+}
+
+.account-avatar {
+  width: 30px;
+  height: 30px;
+  flex-shrink: 0;
+  border-radius: 8px;
+  display: grid;
+  place-items: center;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--blue-text);
+  background: var(--blue-bg);
+}
+
+.popover-account {
+  right: 0;
+  left: auto;
+  min-width: 240px;
+}
+
+.account-name {
+  font-weight: 600;
+  font-size: 14px;
+}
+
+.account-email {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-top: 2px;
+}
+
+.popover-account .popover-option {
+  text-decoration: none;
+  color: inherit;
+}
+
+.popover-account .popover-option span {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.popover-error {
+  margin: 0 12px 10px;
+}
+
+/* ---------- modal (change password) ---------- */
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: grid;
+  place-items: center;
+  padding: 16px;
+  background: rgba(17, 24, 39, 0.35);
+}
+
+.modal {
+  width: 100%;
+  max-width: 400px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 20px;
+  background: var(--surface);
+  border-radius: 14px;
+  box-shadow: 0 20px 50px rgba(17, 24, 39, 0.2);
+}
+
+.modal-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.modal-title {
+  font-weight: 600;
+  font-size: 16px;
+}
+
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+/* ---------- Team page ---------- */
+
+.team {
+  width: 100%;
+  max-width: 860px;
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 0 14px;
+}
+
+.team-intro {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.55;
+  color: var(--text-muted);
+}
+
+.team-card {
+  padding: 18px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+}
+
+.team-card-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 600;
+  font-size: 14px;
+  margin-bottom: 12px;
+}
+
+.team-card-text {
+  margin: 0 0 10px;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+.team-handover {
+  display: flex;
+  gap: 12px;
+  background: #fffaf0;
+  border-color: #f5d9a8;
+  color: #92400e;
+}
+
+.team-handover .team-card-title {
+  margin-bottom: 4px;
+  color: var(--text);
+}
+
+.team-handover-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.team-handover code {
+  padding: 7px 10px;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid #f5d9a8;
+  border-radius: 8px;
+}
+
+.team-notice {
+  font-size: 13px;
+  background: var(--blue-wash);
+  border-color: var(--blue-border);
+}
+
+.team-error {
+  font-size: 13px;
+  color: var(--red-text);
+  background: var(--red-wash);
+  border-color: var(--red-border);
+}
+
+.team-add-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr auto;
+  gap: 10px;
+  align-items: end;
+}
+
+.team-add-row .btn-primary {
+  height: 40px;
+}
+
+.member-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.member-list li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 0;
+  border-top: 1px solid var(--border);
+}
+
+.member-list li:first-child {
+  border-top: 0;
+}
+
+.member-list li.is-disabled {
+  opacity: 0.6;
+}
+
+.member-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  flex: 1;
+}
+
+.member-name {
+  font-weight: 600;
+  font-size: 14px;
+}
+
+.member-sub {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.member-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.member-actions .btn-secondary,
+.member-actions .btn-ghost-danger {
+  height: 32px;
+  font-size: 12px;
+}
+
+@media (max-width: 640px) {
+  .team-add-row {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* ---------- contacts and history (company editor) ---------- */
+
+.contact-list,
+.history-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.contact-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+
+.contact-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  flex: 1;
+}
+
+.contact-name {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 14px;
+  font-weight: 500;
+}
+
+.contact-star {
+  color: #d97706;
+  fill: #fbbf24;
+}
+
+.contact-sub {
+  font-size: 12px;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.contact-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid var(--blue-border);
+  border-radius: 10px;
+  background: var(--blue-wash);
+}
+
+.contact-form input:not([type='checkbox']) {
+  width: 100%;
+  height: 36px;
+  padding: 0 10px;
+  font: inherit;
+  font-size: 13px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.contact-form-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.contact-check {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+}
+
+.contact-form-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.contact-form-actions .btn-secondary,
+.contact-form-actions .btn-primary {
+  height: 32px;
+  font-size: 12px;
+}
+
+.history-list li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 0;
+  font-size: 13px;
+  border-bottom: 1px dashed var(--border);
+}
+
+.history-text {
+  flex: 1;
+  min-width: 0;
+}
+
+.history-via {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 1px 6px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--green-text);
+  background: var(--green-bg);
+  border-radius: 999px;
+}
+
+.history-time {
+  font-size: 12px;
+  color: var(--text-soft);
+  white-space: nowrap;
+}
+
+/* ---------- live updates: changes from the WhatsApp assistant or another tab ----------
+   The same motion language as the rest of the board: a glow ring like a card you just added
+   (WhatsApp green when the change came from WhatsApp, the board's blue otherwise), a small bump,
+   and a badge on the card's top-left edge (tags sit on the top-right) saying where it came from.
+   The ring and wash live on a ::after overlay so the card's own entrance animation is never
+   replaced (removing an override would restart it). */
+
+@keyframes live-ring-green {
+  0%, 35% { box-shadow: 0 0 0 4px rgba(30, 138, 76, 0.32); opacity: 1; }
+  100% { box-shadow: 0 0 0 0 rgba(30, 138, 76, 0); opacity: 1; }
+}
+
+@keyframes live-ring-blue {
+  0%, 35% { box-shadow: 0 0 0 4px rgba(21, 101, 216, 0.35); opacity: 1; }
+  100% { box-shadow: 0 0 0 0 rgba(21, 101, 216, 0); opacity: 1; }
+}
+
+@keyframes live-wash-green {
+  0%, 40% { background: rgba(30, 138, 76, 0.07); box-shadow: inset 3px 0 0 var(--green-text); }
+  100% { background: transparent; box-shadow: inset 3px 0 0 transparent; }
+}
+
+@keyframes live-wash-blue {
+  0%, 40% { background: rgba(21, 101, 216, 0.06); box-shadow: inset 3px 0 0 var(--primary); }
+  100% { background: transparent; box-shadow: inset 3px 0 0 transparent; }
+}
+
+@keyframes live-bump {
+  0% { scale: 1; }
+  35% { scale: 1.04; }
+  100% { scale: 1; }
+}
+
+@keyframes live-badge-in-out {
+  0% { opacity: 0; transform: translateY(4px) scale(0.9); }
+  12%, 78% { opacity: 1; transform: none; }
+  100% { opacity: 0; transform: translateY(-3px); }
+}
+
+.event-card.live-added::after,
+.event-card.live-changed::after,
+.company-cell.live-changed::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+}
+
+.event-card.live-whatsapp::after { animation: live-ring-green 2.4s ease-out forwards; }
+.event-card.live-app::after { animation: live-ring-blue 1.8s ease-out forwards; }
+.company-cell.live-whatsapp::after { animation: live-wash-green 2.4s ease-out forwards; }
+.company-cell.live-app::after { animation: live-wash-blue 2.4s ease-out forwards; }
+
+/* `scale` is its own property, so the bump never touches the card's transform or animation */
+.event-card.live-changed .event-icon,
+.event-card.live-added .event-icon {
+  animation: live-bump 0.45s cubic-bezier(0.3, 1.5, 0.5, 1);
+}
+
+.live-badge {
+  position: absolute;
+  top: -9px;
+  left: 10px;
+  z-index: 2;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 1px 7px;
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 16px;
+  color: #fff;
+  background: var(--green-text);
+  border-radius: 999px;
+  pointer-events: none;
+  animation: live-badge-in-out 2.6s ease forwards;
+}
+
+.live-app .live-badge {
+  background: var(--primary);
+}
+
+.toast-whatsapp svg {
+  color: #6fe0a2;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .event-card.live-added::after,
+  .event-card.live-changed::after,
+  .company-cell.live-changed::after,
+  .event-card .event-icon,
+  .live-badge {
+    animation-duration: 0.01ms;
+  }
+}

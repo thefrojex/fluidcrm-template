@@ -1,0 +1,6 @@
+/* FluidCRM's own design (src/crm/fluidcrm.css) is plain CSS. Tailwind's theme and utilities are
+   available for new UI, but not its preflight reset, which would restyle the existing design. */
+@import "tailwindcss/theme.css" layer(theme);
+@import "tailwindcss/utilities.css" layer(utilities);
+@import "./crm/fluidcrm.css";
+@import "./crm/app.css";
