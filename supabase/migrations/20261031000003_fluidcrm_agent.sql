@@ -45,24 +45,60 @@ LANGUAGE sql STABLE SECURITY INVOKER SET search_path = __APP_SCHEMA__, pg_temp A
   END
 $$;
 
--- One deal the person named: exact company name first, then a unique partial match.
+-- A company name the way people say it: no case, spacing, punctuation, or "Pvt Ltd"-type words.
+CREATE OR REPLACE FUNCTION __APP_SCHEMA__.name_key(t text) RETURNS text
+LANGUAGE sql IMMUTABLE AS $$
+  SELECT regexp_replace(
+    regexp_replace(lower(coalesce(t, '')), '\m(pvt|private|ltd|limited|llp|inc|co|company|corp|corporation|the|and)\M|&', ' ', 'g'),
+    '[^a-z0-9]', '', 'g')
+$$;
+
+-- The deal for a company the person named, matched the forgiving way people say names: exact
+-- first, then ignoring case / spacing / "Pvt Ltd", then a shortened or longer form ("Meridian Tech"
+-- for Meridian Technologies, "Astra Healthcare" for Astra Health), then the same first word. At
+-- each step one match wins and several ask which; null when nothing matches.
 CREATE OR REPLACE FUNCTION __APP_SCHEMA__.resolve_deal(company text) RETURNS uuid
 LANGUAGE plpgsql STABLE SECURITY INVOKER SET search_path = __APP_SCHEMA__, pg_temp AS $$
 DECLARE
+  q text := __APP_SCHEMA__.name_key(company);
+  first_word text := lower(substring(btrim(company) FROM '^[^\s]+'));
+  tier integer;
   found uuid[];
   names text;
 BEGIN
-  SELECT array_agg(d.id) INTO found FROM __APP_SCHEMA__.deals d JOIN __APP_SCHEMA__.companies c ON (c.id = d.company_id)
-  WHERE d.deleted_at IS NULL AND c.deleted_at IS NULL AND lower(c.name) = lower(btrim(company));
-  IF coalesce(array_length(found, 1), 0) = 1 THEN RETURN found[1]; END IF;
-  SELECT array_agg(d.id), string_agg(c.name, ', ' ORDER BY c.name) INTO found, names
-  FROM __APP_SCHEMA__.deals d JOIN __APP_SCHEMA__.companies c ON (c.id = d.company_id)
-  WHERE d.deleted_at IS NULL AND c.deleted_at IS NULL AND c.name ILIKE '%' || btrim(company) || '%';
-  IF coalesce(array_length(found, 1), 0) = 1 THEN RETURN found[1]; END IF;
-  IF coalesce(array_length(found, 1), 0) > 1 THEN
-    RAISE EXCEPTION 'Several companies match "%": %. Which one?', company, names;
-  END IF;
+  IF q = '' THEN RETURN NULL; END IF;
+  FOR tier IN 1..4 LOOP
+    SELECT array_agg(d.id), string_agg(c.name, ', ' ORDER BY c.name) INTO found, names
+    FROM __APP_SCHEMA__.deals d JOIN __APP_SCHEMA__.companies c ON (c.id = d.company_id)
+    WHERE d.deleted_at IS NULL AND c.deleted_at IS NULL AND CASE tier
+      WHEN 1 THEN lower(c.name) = lower(btrim(company))
+      WHEN 2 THEN __APP_SCHEMA__.name_key(c.name) = q
+      WHEN 3 THEN length(q) >= 4 AND (__APP_SCHEMA__.name_key(c.name) LIKE '%' || q || '%'
+        OR (length(__APP_SCHEMA__.name_key(c.name)) >= 4 AND q LIKE __APP_SCHEMA__.name_key(c.name) || '%'))
+      ELSE length(first_word) >= 4 AND lower(substring(c.name FROM '^[^\s]+')) = first_word
+    END;
+    IF coalesce(array_length(found, 1), 0) = 1 THEN RETURN found[1]; END IF;
+    IF coalesce(array_length(found, 1), 0) > 1 THEN
+      RAISE EXCEPTION 'Several companies match "%": %. Which one?', company, names;
+    END IF;
+  END LOOP;
   RETURN NULL;
+END $$;
+
+-- When nothing matched: the closest names on their board, for the assistant to offer or pick from.
+CREATE OR REPLACE FUNCTION __APP_SCHEMA__.no_such_company(company text) RETURNS void
+LANGUAGE plpgsql STABLE SECURITY INVOKER SET search_path = __APP_SCHEMA__, pg_temp AS $$
+DECLARE
+  q text := __APP_SCHEMA__.name_key(company);
+  closest text;
+BEGIN
+  SELECT string_agg(name, ', ') INTO closest FROM (
+    SELECT c.name FROM __APP_SCHEMA__.deals d JOIN __APP_SCHEMA__.companies c ON (c.id = d.company_id)
+    WHERE d.deleted_at IS NULL AND c.deleted_at IS NULL
+    ORDER BY (left(__APP_SCHEMA__.name_key(c.name), 2) = left(q, 2)) DESC, (left(__APP_SCHEMA__.name_key(c.name), 1) = left(q, 1)) DESC, c.name
+    LIMIT 8) x;
+  RAISE EXCEPTION 'There''s no company called "%" on their board. Companies there include: %. If they meant one of these, use its exact name; if it really is a new client, call again with new_company = true.',
+    company, coalesce(closest, 'none yet');
 END $$;
 
 CREATE OR REPLACE FUNCTION __APP_SCHEMA__.check_event_type(t text) RETURNS text
@@ -136,7 +172,10 @@ BEGIN
   LEFT JOIN __APP_SCHEMA__.event_status s ON (s.id = e.id)
   WHERE d.deleted_at IS NULL AND c.deleted_at IS NULL AND d.status = 'open'
     AND (query IS NULL OR btrim(query) = ''
-      OR c.name ILIKE '%' || btrim(query) || '%' OR c.industry ILIKE '%' || btrim(query) || '%' OR c.city ILIKE '%' || btrim(query) || '%'
+      OR c.name ILIKE '%' || btrim(query) || '%' OR __APP_SCHEMA__.name_key(c.name) LIKE '%' || __APP_SCHEMA__.name_key(query) || '%'
+      OR (length(__APP_SCHEMA__.name_key(query)) >= 4 AND __APP_SCHEMA__.name_key(query) LIKE __APP_SCHEMA__.name_key(c.name) || '%')
+      OR lower(substring(c.name FROM '^[^\s]+')) = lower(substring(btrim(query) FROM '^[^\s]+')) AND length(substring(btrim(query) FROM '^[^\s]+')) >= 4
+      OR c.industry ILIKE '%' || btrim(query) || '%' OR c.city ILIKE '%' || btrim(query) || '%'
       OR EXISTS (SELECT 1 FROM __APP_SCHEMA__.contacts ct WHERE ct.company_id = c.id AND ct.deleted_at IS NULL AND ct.name ILIKE '%' || btrim(query) || '%'))
   GROUP BY d.id, c.id
   ORDER BY d.board_position, c.name;
@@ -199,13 +238,14 @@ CREATE OR REPLACE FUNCTION __APP_SCHEMA__.agent_log_interaction(
   next_step text DEFAULT NULL,
   next_step_date date DEFAULT NULL,
   next_step_type text DEFAULT NULL,
-  title text DEFAULT NULL
+  title text DEFAULT NULL,
+  new_company boolean DEFAULT false
 ) RETURNS jsonb
 LANGUAGE plpgsql VOLATILE SECURITY INVOKER SET search_path = __APP_SCHEMA__, pg_temp AS $$
 DECLARE
   target uuid;
   company_row uuid;
-  new_company boolean := false;
+  created_company boolean := false;
   contact uuid;
   new_contact boolean := false;
   kind text := coalesce(__APP_SCHEMA__.check_event_type(interaction_type), 'call');
@@ -225,10 +265,13 @@ BEGIN
 
   target := __APP_SCHEMA__.resolve_deal(company);
   IF target IS NULL THEN
+    -- A name that matches nothing is far more often a different way of saying an existing client
+    -- than a new one: only create it when they've said it's new
+    IF NOT coalesce(agent_log_interaction.new_company, false) THEN PERFORM __APP_SCHEMA__.no_such_company(company); END IF;
     INSERT INTO __APP_SCHEMA__.companies (name) VALUES (btrim(company)) RETURNING id INTO company_row;
     INSERT INTO __APP_SCHEMA__.deals (company_id, board_position)
       VALUES (company_row, coalesce((SELECT min(board_position) FROM __APP_SCHEMA__.deals), 0) - 1) RETURNING id INTO target;
-    new_company := true;
+    created_company := true;
   ELSE
     SELECT d.company_id INTO company_row FROM __APP_SCHEMA__.deals d WHERE d.id = target;
   END IF;
@@ -258,15 +301,15 @@ BEGIN
   END IF;
 
   reply := 'Logged "' || label || '" on ' || (SELECT name FROM __APP_SCHEMA__.companies WHERE id = company_row)
-    || CASE WHEN new_company THEN ' (new company)' ELSE '' END
+    || CASE WHEN created_company THEN ' (new company)' ELSE '' END
     || CASE WHEN new_contact THEN ', and added ' || btrim(contact_name) || ' as a contact' ELSE '' END
     || '.' || CASE WHEN next_id IS NOT NULL THEN ' Next step: ' || btrim(next_step) || ' on ' || to_char(next_step_date, 'Dy DD Mon') || '.' ELSE '' END;
   -- A company name ending in "." (Pvt. Ltd.) shouldn't end the sentence twice
   reply := regexp_replace(reply, '\.\.(\s|$)', '.\1', 'g');
   RETURN jsonb_build_object('message', reply, 'deal_id', target, 'logged_event_id', logged, 'next_event_id', next_id);
 END $$;
-COMMENT ON FUNCTION __APP_SCHEMA__.agent_log_interaction(text, text, text, text, date, text, date, text, text) IS
-  '{"description": "Record something that already happened with a client - a conversation, a meeting, a PO or payment received, a contract signed: adds a completed event (titled from title, or from the type and contact) with their summary as notes to that company''s timeline, adds the contact if new, and optionally schedules the agreed next step. Creates the company if it doesn''t exist yet - say so when confirming.", "audience": "team", "confirm": true, "params": {"company": "Company name as they said it", "summary": "What was discussed and agreed, in their words, cleaned up", "contact_name": "Who they spoke to, if mentioned", "interaction_type": "call, meeting, demo, email, lunch, site_visit, negotiation, pricing or another event type (default call)", "happened_on": "YYYY-MM-DD, default today", "next_step": "Short title of the agreed next action, if any", "next_step_date": "YYYY-MM-DD for the next step (required with next_step)", "next_step_type": "Event type for the next step, default same as the interaction", "title": "Short title for what happened if it isn''t just a call or meeting with someone, e.g. PO received, Payment received, Contract signed"}}';
+COMMENT ON FUNCTION __APP_SCHEMA__.agent_log_interaction(text, text, text, text, date, text, date, text, text, boolean) IS
+  '{"description": "Record something that already happened with a client - a conversation, a meeting, a PO or payment received, a contract signed: adds a completed event (titled from title, or from the type and contact) with their summary as notes to that company''s timeline, adds the contact if new, and optionally schedules the agreed next step. Works on an existing company; only creates one with new_company = true.", "audience": "team", "confirm": true, "params": {"company": "Company name as they said it", "summary": "What was discussed and agreed, in their words, cleaned up", "contact_name": "Who they spoke to, if mentioned", "interaction_type": "call, meeting, demo, email, lunch, site_visit, negotiation, pricing or another event type (default call)", "happened_on": "YYYY-MM-DD, default today", "next_step": "Short title of the agreed next action, if any", "next_step_date": "YYYY-MM-DD for the next step (required with next_step)", "next_step_type": "Event type for the next step, default same as the interaction", "title": "Short title for what happened if it isn''t just a call or meeting with someone, e.g. PO received, Payment received, Contract signed", "new_company": "true only when they say this is a new client not on the board yet; otherwise leave it out - an unknown name gets back the closest existing companies"}}';
 
 CREATE OR REPLACE FUNCTION __APP_SCHEMA__.agent_add_event(deal_id uuid, title text, event_date date, event_type text DEFAULT 'call', notes text DEFAULT NULL)
 RETURNS jsonb
@@ -472,14 +515,15 @@ CREATE OR REPLACE FUNCTION __APP_SCHEMA__.agent_add_contact(
   job_title text DEFAULT NULL,
   email text DEFAULT NULL,
   phone text DEFAULT NULL,
-  is_decision_maker boolean DEFAULT NULL
+  is_decision_maker boolean DEFAULT NULL,
+  new_company boolean DEFAULT false
 ) RETURNS jsonb
 LANGUAGE plpgsql VOLATILE SECURITY INVOKER SET search_path = __APP_SCHEMA__, pg_temp AS $$
 DECLARE
   target uuid;
   company_row uuid;
   company_name text;
-  new_company boolean := false;
+  created_company boolean := false;
   existing __APP_SCHEMA__.contacts;
   filled text[] := '{}';
 BEGIN
@@ -491,10 +535,11 @@ BEGIN
 
   target := __APP_SCHEMA__.resolve_deal(company);
   IF target IS NULL THEN
+    IF NOT coalesce(agent_add_contact.new_company, false) THEN PERFORM __APP_SCHEMA__.no_such_company(company); END IF;
     INSERT INTO __APP_SCHEMA__.companies (name) VALUES (btrim(company)) RETURNING id INTO company_row;
     INSERT INTO __APP_SCHEMA__.deals (company_id, board_position)
       VALUES (company_row, coalesce((SELECT min(board_position) FROM __APP_SCHEMA__.deals), 0) - 1);
-    new_company := true;
+    created_company := true;
   ELSE
     SELECT d.company_id INTO company_row FROM __APP_SCHEMA__.deals d WHERE d.id = target;
   END IF;
@@ -508,7 +553,7 @@ BEGIN
     VALUES (company_row, btrim(agent_add_contact.name), nullif(btrim(job_title), ''), nullif(btrim(email), ''), nullif(btrim(phone), ''), coalesce(is_decision_maker, false));
     RETURN jsonb_build_object('message', regexp_replace('Added ' || btrim(agent_add_contact.name)
       || coalesce(' (' || nullif(btrim(job_title), '') || ')', '') || ' to ' || company_name
-      || CASE WHEN new_company THEN ' - a new company on your board' ELSE '' END || '.', '\.\.$', '.'));
+      || CASE WHEN created_company THEN ' - a new company on your board' ELSE '' END || '.', '\.\.$', '.'));
   END IF;
 
   IF existing.job_title IS NULL AND nullif(btrim(job_title), '') IS NOT NULL THEN filled := filled || 'job title'::text; END IF;
@@ -526,8 +571,8 @@ BEGIN
   RETURN jsonb_build_object('message', existing.name || ' was already a contact at ' || company_name
     || CASE WHEN cardinality(filled) > 0 THEN ' - added their ' || array_to_string(filled, ', ') ELSE ' - updated them' END || '.');
 END $$;
-COMMENT ON FUNCTION __APP_SCHEMA__.agent_add_contact(text, text, text, text, text, boolean) IS
-  '{"description": "Add a person as a contact at a company - for example from a photo of their business card. Creates the company if it isn''t on the board yet (say so when confirming). If the person is already there, fills in missing details instead of adding them twice.", "audience": "team", "confirm": true, "params": {"company": "Company name", "name": "Full name", "job_title": "Title, if known", "email": "Email, if known", "phone": "Phone with country code, if known", "is_decision_maker": "true if they decide on the purchase (e.g. CFO, owner, director)"}}';
+COMMENT ON FUNCTION __APP_SCHEMA__.agent_add_contact(text, text, text, text, text, boolean, boolean) IS
+  '{"description": "Add a person as a contact at a company - for example from a photo of their business card. Works on an existing company; creates one only with new_company = true (a business card from someone new). If the person is already there, fills in missing details instead of adding them twice.", "audience": "team", "confirm": true, "params": {"company": "Company name", "name": "Full name", "job_title": "Title, if known", "email": "Email, if known", "phone": "Phone with country code, if known", "is_decision_maker": "true if they decide on the purchase (e.g. CFO, owner, director)", "new_company": "true only when the company is new to them (not on the board yet); an unknown name otherwise gets back the closest existing companies"}}';
 
 -- Functions are executable by PUBLIC (which includes signed-out visitors) unless revoked. Only
 -- signed-in people may call anything here; the internal seed and trigger functions not even them.
