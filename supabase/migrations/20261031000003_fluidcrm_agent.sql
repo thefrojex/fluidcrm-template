@@ -259,6 +259,8 @@ BEGIN
     || CASE WHEN new_company THEN ' (new company)' ELSE '' END
     || CASE WHEN new_contact THEN ', and added ' || btrim(contact_name) || ' as a contact' ELSE '' END
     || '.' || CASE WHEN next_id IS NOT NULL THEN ' Next step: ' || btrim(next_step) || ' on ' || to_char(next_step_date, 'Dy DD Mon') || '.' ELSE '' END;
+  -- A company name ending in "." (Pvt. Ltd.) shouldn't end the sentence twice
+  reply := regexp_replace(reply, '\.\.(\s|$)', '.\1', 'g');
   RETURN jsonb_build_object('message', reply, 'deal_id', target, 'logged_event_id', logged, 'next_event_id', next_id);
 END $$;
 COMMENT ON FUNCTION __APP_SCHEMA__.agent_log_interaction(text, text, text, text, date, text, date, text) IS
@@ -459,6 +461,71 @@ BEGIN
 END $$;
 COMMENT ON FUNCTION __APP_SCHEMA__.agent_update_event(uuid, text, date, text, text, boolean, boolean) IS
   '{"description": "Change an existing event on a deal''s timeline: move it to another date (its pending reminders move with it), rename it, change its type, add a note without completing it, reopen one marked done, or remove it from the board (cancel). Only pass what changes.", "audience": "team", "confirm": true, "params": {"event_id": "From agent_deal_context or agent_my_agenda", "title": "New title", "event_date": "New date, YYYY-MM-DD", "event_type": "New type: call, demo, meeting, email, document, contract, pricing, negotiation, site_visit, lunch, closing, ...", "add_note": "Text to add to the event''s notes", "reopen": "true to mark a done event as not done", "cancel": "true to remove the event from the board (on its own, no other changes)"}}';
+
+-- Add a contact (e.g. from a photo of a business card): to the named company - created if it's new -
+-- or, if someone with that name is already there, fill in what's missing rather than duplicating them.
+CREATE OR REPLACE FUNCTION __APP_SCHEMA__.agent_add_contact(
+  company text,
+  name text,
+  job_title text DEFAULT NULL,
+  email text DEFAULT NULL,
+  phone text DEFAULT NULL,
+  is_decision_maker boolean DEFAULT NULL
+) RETURNS jsonb
+LANGUAGE plpgsql VOLATILE SECURITY INVOKER SET search_path = __APP_SCHEMA__, pg_temp AS $$
+DECLARE
+  target uuid;
+  company_row uuid;
+  company_name text;
+  new_company boolean := false;
+  existing __APP_SCHEMA__.contacts;
+  filled text[] := '{}';
+BEGIN
+  PERFORM __APP_SCHEMA__.require_member();
+  PERFORM set_config('app.via', 'whatsapp', true);
+  IF btrim(coalesce(company, '')) = '' THEN RAISE EXCEPTION 'Which company does % work at?', coalesce(nullif(btrim(name), ''), 'this person'); END IF;
+  IF btrim(coalesce(name, '')) = '' THEN RAISE EXCEPTION 'What''s the person''s name?'; END IF;
+  IF email IS NOT NULL AND btrim(email) <> '' AND btrim(email) !~ '^[^@\s]+@[^@\s]+\.[^@\s]+$' THEN RAISE EXCEPTION '"%" doesn''t look like an email address.', email; END IF;
+
+  target := __APP_SCHEMA__.resolve_deal(company);
+  IF target IS NULL THEN
+    INSERT INTO __APP_SCHEMA__.companies (name) VALUES (btrim(company)) RETURNING id INTO company_row;
+    INSERT INTO __APP_SCHEMA__.deals (company_id, board_position)
+      VALUES (company_row, coalesce((SELECT min(board_position) FROM __APP_SCHEMA__.deals), 0) - 1);
+    new_company := true;
+  ELSE
+    SELECT d.company_id INTO company_row FROM __APP_SCHEMA__.deals d WHERE d.id = target;
+  END IF;
+  SELECT c.name INTO company_name FROM __APP_SCHEMA__.companies c WHERE c.id = company_row;
+
+  SELECT * INTO existing FROM __APP_SCHEMA__.contacts ct
+  WHERE ct.company_id = company_row AND ct.deleted_at IS NULL AND lower(ct.name) = lower(btrim(agent_add_contact.name));
+
+  IF existing.id IS NULL THEN
+    INSERT INTO __APP_SCHEMA__.contacts (company_id, name, job_title, email, phone, is_decision_maker)
+    VALUES (company_row, btrim(agent_add_contact.name), nullif(btrim(job_title), ''), nullif(btrim(email), ''), nullif(btrim(phone), ''), coalesce(is_decision_maker, false));
+    RETURN jsonb_build_object('message', regexp_replace('Added ' || btrim(agent_add_contact.name)
+      || coalesce(' (' || nullif(btrim(job_title), '') || ')', '') || ' to ' || company_name
+      || CASE WHEN new_company THEN ' - a new company on your board' ELSE '' END || '.', '\.\.$', '.'));
+  END IF;
+
+  IF existing.job_title IS NULL AND nullif(btrim(job_title), '') IS NOT NULL THEN filled := filled || 'job title'::text; END IF;
+  IF existing.email IS NULL AND nullif(btrim(email), '') IS NOT NULL THEN filled := filled || 'email'::text; END IF;
+  IF existing.phone IS NULL AND nullif(btrim(phone), '') IS NOT NULL THEN filled := filled || 'phone'::text; END IF;
+  IF cardinality(filled) = 0 AND is_decision_maker IS NULL THEN
+    RETURN jsonb_build_object('message', existing.name || ' is already a contact at ' || company_name || ' - nothing new to add.');
+  END IF;
+  UPDATE __APP_SCHEMA__.contacts SET
+    job_title = coalesce(contacts.job_title, nullif(btrim(agent_add_contact.job_title), '')),
+    email = coalesce(contacts.email, nullif(btrim(agent_add_contact.email), '')),
+    phone = coalesce(contacts.phone, nullif(btrim(agent_add_contact.phone), '')),
+    is_decision_maker = coalesce(agent_add_contact.is_decision_maker, contacts.is_decision_maker)
+  WHERE id = existing.id;
+  RETURN jsonb_build_object('message', existing.name || ' was already a contact at ' || company_name
+    || CASE WHEN cardinality(filled) > 0 THEN ' - added their ' || array_to_string(filled, ', ') ELSE ' - updated them' END || '.');
+END $$;
+COMMENT ON FUNCTION __APP_SCHEMA__.agent_add_contact(text, text, text, text, text, boolean) IS
+  '{"description": "Add a person as a contact at a company - for example from a photo of their business card. Creates the company if it isn''t on the board yet (say so when confirming). If the person is already there, fills in missing details instead of adding them twice.", "audience": "team", "confirm": true, "params": {"company": "Company name", "name": "Full name", "job_title": "Title, if known", "email": "Email, if known", "phone": "Phone with country code, if known", "is_decision_maker": "true if they decide on the purchase (e.g. CFO, owner, director)"}}';
 
 -- Functions are executable by PUBLIC (which includes signed-out visitors) unless revoked. Only
 -- signed-in people may call anything here; the internal seed and trigger functions not even them.
