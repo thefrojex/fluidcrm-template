@@ -198,7 +198,8 @@ CREATE OR REPLACE FUNCTION __APP_SCHEMA__.agent_log_interaction(
   happened_on date DEFAULT NULL,
   next_step text DEFAULT NULL,
   next_step_date date DEFAULT NULL,
-  next_step_type text DEFAULT NULL
+  next_step_type text DEFAULT NULL,
+  title text DEFAULT NULL
 ) RETURNS jsonb
 LANGUAGE plpgsql VOLATILE SECURITY INVOKER SET search_path = __APP_SCHEMA__, pg_temp AS $$
 DECLARE
@@ -243,7 +244,8 @@ BEGIN
     END IF;
   END IF;
 
-  label := initcap(replace(kind, '_', ' ')) || coalesce(' with ' || (SELECT split_part(name, ' ', 1) FROM __APP_SCHEMA__.contacts WHERE id = contact), '');
+  label := coalesce(nullif(btrim(agent_log_interaction.title), ''),
+    initcap(replace(kind, '_', ' ')) || coalesce(' with ' || (SELECT split_part(name, ' ', 1) FROM __APP_SCHEMA__.contacts WHERE id = contact), ''));
   INSERT INTO __APP_SCHEMA__.deal_events (deal_id, title, event_type, event_date, sort_key, owner_kind, notes, completed_at, origin)
   VALUES (target, label, kind, day, __APP_SCHEMA__.next_sort_key(target, day), 'user', btrim(summary), now(), 'whatsapp')
   RETURNING id INTO logged;
@@ -263,8 +265,8 @@ BEGIN
   reply := regexp_replace(reply, '\.\.(\s|$)', '.\1', 'g');
   RETURN jsonb_build_object('message', reply, 'deal_id', target, 'logged_event_id', logged, 'next_event_id', next_id);
 END $$;
-COMMENT ON FUNCTION __APP_SCHEMA__.agent_log_interaction(text, text, text, text, date, text, date, text) IS
-  '{"description": "Record a conversation or meeting the person already had with a client: adds a completed event with their summary as notes to that company''s timeline, adds the contact if new, and optionally schedules the agreed next step. Creates the company if it doesn''t exist yet - say so when confirming.", "audience": "team", "confirm": true, "params": {"company": "Company name as they said it", "summary": "What was discussed and agreed, in their words, cleaned up", "contact_name": "Who they spoke to, if mentioned", "interaction_type": "call, meeting, demo, email, lunch, site_visit, negotiation, pricing or another event type (default call)", "happened_on": "YYYY-MM-DD, default today", "next_step": "Short title of the agreed next action, if any", "next_step_date": "YYYY-MM-DD for the next step (required with next_step)", "next_step_type": "Event type for the next step, default same as the interaction"}}';
+COMMENT ON FUNCTION __APP_SCHEMA__.agent_log_interaction(text, text, text, text, date, text, date, text, text) IS
+  '{"description": "Record something that already happened with a client - a conversation, a meeting, a PO or payment received, a contract signed: adds a completed event (titled from title, or from the type and contact) with their summary as notes to that company''s timeline, adds the contact if new, and optionally schedules the agreed next step. Creates the company if it doesn''t exist yet - say so when confirming.", "audience": "team", "confirm": true, "params": {"company": "Company name as they said it", "summary": "What was discussed and agreed, in their words, cleaned up", "contact_name": "Who they spoke to, if mentioned", "interaction_type": "call, meeting, demo, email, lunch, site_visit, negotiation, pricing or another event type (default call)", "happened_on": "YYYY-MM-DD, default today", "next_step": "Short title of the agreed next action, if any", "next_step_date": "YYYY-MM-DD for the next step (required with next_step)", "next_step_type": "Event type for the next step, default same as the interaction", "title": "Short title for what happened if it isn''t just a call or meeting with someone, e.g. PO received, Payment received, Contract signed"}}';
 
 CREATE OR REPLACE FUNCTION __APP_SCHEMA__.agent_add_event(deal_id uuid, title text, event_date date, event_type text DEFAULT 'call', notes text DEFAULT NULL)
 RETURNS jsonb
