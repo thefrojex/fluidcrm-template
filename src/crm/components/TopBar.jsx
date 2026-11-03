@@ -1,5 +1,5 @@
 import { forwardRef, useEffect, useLayoutEffect, useRef, useState } from 'react'
-import { Calendar, Filter, Search, Table2, List, Plus, Inbox, X, Check } from 'lucide-react'
+import { Calendar, Filter, Search, Table2, List, Plus, Inbox, X, Check, AlignCenterVertical } from 'lucide-react'
 import Tooltip from './Tooltip.jsx'
 import { getMe } from '../lib/me.js'
 
@@ -151,6 +151,8 @@ export default function TopBar({
   onFilterChange,
   view,
   onViewChange,
+  aligned,
+  onToggleAligned,
   search,
   onSearchChange,
   searchRef,
@@ -182,6 +184,14 @@ export default function TopBar({
             <button className="ctrl-btn">
               <Calendar size={16} />
               <span>{fmt(range.from, { month: 'short', year: 'numeric' })} – {fmt(range.to, { month: 'short', year: 'numeric' })}</span>
+            </button>
+          </Tooltip>
+        )}
+        {view === 'timeline' && (
+          <Tooltip label={aligned ? 'Rows scroll together, lined up on today · click to scroll each row on its own' : 'Line up every row on today and scroll them together'} side="bottom">
+            <button className={`ctrl-btn ${aligned ? 'is-on' : ''}`} onClick={onToggleAligned} aria-pressed={aligned}>
+              <AlignCenterVertical size={16} />
+              <span>Line up today</span>
             </button>
           </Tooltip>
         )}

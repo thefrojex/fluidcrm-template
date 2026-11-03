@@ -360,6 +360,38 @@ button {
   width: 100%;
 }
 
+/* Lined up by today: one scroller for every row, each row as wide as its content, and a spacer
+   (sized in DealsTimeline) in front of each so the Today markers form one vertical line */
+.board.is-aligned .board-scroll {
+  overflow-x: auto;
+  overflow-y: hidden;
+  overscroll-behavior-x: contain;
+}
+
+.board.is-aligned .timeline-area {
+  width: max-content;
+  min-width: 100%;
+}
+
+.board.is-aligned .timeline-track {
+  overflow: visible;
+}
+
+.align-spacer {
+  flex: 0 0 auto;
+  width: 0;
+  align-self: stretch;
+}
+
+.board.is-aligned .board-scroll::-webkit-scrollbar {
+  height: 8px;
+}
+
+.board.is-aligned .board-scroll::-webkit-scrollbar-thumb {
+  background: #d3d7dd;
+  border-radius: 999px;
+}
+
 .company-col {
   flex: 0 0 var(--company-w);
   width: var(--company-w);
@@ -576,14 +608,15 @@ button {
   overscroll-behavior-x: contain;
 }
 
+/* Cards keep one width however few events a row has, so a short timeline doesn't stretch them */
 .track-item {
   display: flex;
   align-items: center;
-  flex: 1 0 auto;
+  flex: 0 0 auto;
 }
 
 .track-item .event-card {
-  flex: 1 0 auto;
+  flex: 0 0 auto;
 }
 
 .event-card {
@@ -595,7 +628,7 @@ button {
   animation-delay: calc(var(--i, 0) * 35ms);
   --tile-bg: #f1f3f6;
   --tile-fg: #4b5563;
-  min-width: 150px;
+  width: 240px;
   height: 90px;
   display: flex;
   align-items: flex-start;
@@ -2221,11 +2254,8 @@ button {
   gap: 4px;
 }
 
-.event-card.has-two-tags {
-  min-width: 228px;
-}
-
 .ai-tag,
+.wa-tag,
 .reminder-tag {
   display: inline-flex;
   align-items: center;
@@ -2255,6 +2285,13 @@ button {
   background: #f3effe;
   box-shadow: inset 0 0 0 1px #e0d5fc, 0 0 0 2px var(--surface);
   animation: none;
+}
+
+/* Added by the WhatsApp assistant: quiet provenance, like an accepted AI suggestion */
+.wa-tag {
+  color: #15803d;
+  background: #ecfbf1;
+  box-shadow: inset 0 0 0 1px #bfe9cf, 0 0 0 2px var(--surface);
 }
 
 .reminder-tag {
@@ -2376,6 +2413,11 @@ button {
 
 .event-list-ai {
   color: var(--ai-from);
+  flex-shrink: 0;
+}
+
+.event-list-wa {
+  color: #16a34a;
   flex-shrink: 0;
 }
 

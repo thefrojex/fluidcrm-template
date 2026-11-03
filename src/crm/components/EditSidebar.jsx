@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { X, Trash2, ChevronRight, ChevronDown, Check, AlertCircle, ArrowRight, Sparkles, Bell, Plus } from 'lucide-react'
+import { X, Trash2, ChevronRight, ChevronDown, Check, AlertCircle, ArrowRight, Sparkles, Bell, Plus, MessageCircle } from 'lucide-react'
 import { companyIcons, eventIcons, eventTypeOptions } from './icons.js'
 import {
   channelLabel, eventStatuses, formatDay, formatReminderTime, isPendingSuggestion, reminderChannels, reminderState,
@@ -422,6 +422,7 @@ function CompanyEditor({ deal, isNew, onChange, onSelectEvent, onDelete, onDone 
                         <span className="event-list-title">{event.title || 'Untitled event'}</span>
                         {event.reminders?.length > 0 && <Bell size={13} className="event-list-bell" aria-label="Has reminders" />}
                         {event.ai && <Sparkles size={13} className="event-list-ai" aria-label="AI suggestion" />}
+                        {event.origin === 'whatsapp' && <MessageCircle size={13} className="event-list-wa" aria-label="Added from WhatsApp" />}
                         <span className={`event-list-date ${status === 'overdue' ? 'is-overdue' : ''}`}>{formatDay(event.date)}</span>
                         <ChevronRight size={15} />
                       </button>

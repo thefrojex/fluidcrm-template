@@ -27,9 +27,20 @@ const verbs = {
 }
 const LIVE_MS = 2600
 
+// "Line up by today" is a per-browser preference; storage can be unavailable (private windows)
+const alignKey = 'fluidcrm.alignToday'
+const readAligned = () => {
+  try { return localStorage.getItem(alignKey) === '1' } catch { return false }
+}
+const saveAligned = (on) => {
+  try { localStorage.setItem(alignKey, on ? '1' : '0') } catch { /* not kept */ }
+}
+
 export default function Board({ accountMenu, userId }) {
   const [activeFilter, setActiveFilter] = useState(filters[0])
   const [view, setView] = useState('timeline')
+  const [aligned, setAligned] = useState(readAligned)
+  const toggleAligned = () => setAligned((on) => (saveAligned(!on), !on))
   const [search, setSearch] = useState('')
   const [sort, setSort] = useState('default')
   const [owner, setOwner] = useState('all')
@@ -318,6 +329,8 @@ export default function Board({ accountMenu, userId }) {
         onFilterChange={setActiveFilter}
         view={view}
         onViewChange={setView}
+        aligned={aligned}
+        onToggleAligned={toggleAligned}
         search={search}
         onSearchChange={setSearch}
         searchRef={searchRef}
@@ -344,6 +357,7 @@ export default function Board({ accountMenu, userId }) {
           onToggleDone={toggleDone}
           onDeleteEvent={deleteEvent}
           onAcceptEvent={acceptSuggestion}
+          aligned={aligned}
         />
       ) : (
         <DealsTable

@@ -99,12 +99,14 @@ function StatusChip({ status, date }) {
   return null
 }
 
-// Tags on the card's top-right edge. Order is fixed: reminders first, AI provenance last (rightmost).
+const fromWhatsApp = (event) => event.origin === 'whatsapp'
+
+// Tags on the card's top-right edge. Order is fixed: reminders first, provenance (AI or WhatsApp) last (rightmost).
 function CardTags({ event }) {
   const count = event.reminders?.length ?? 0
   const upcoming = nextReminder(event)
   const pending = isPendingSuggestion(event)
-  if (!count && !event.ai) return null
+  if (!count && !event.ai && !fromWhatsApp(event)) return null
   return (
     <div className="card-tags">
       {count > 0 && (
@@ -129,6 +131,14 @@ function CardTags({ event }) {
           </span>
         </Tooltip>
       )}
+      {fromWhatsApp(event) && (
+        <Tooltip label="Added from WhatsApp by the assistant">
+          <span className="wa-tag">
+            <MessageCircle size={11} strokeWidth={2.5} />
+            WhatsApp
+          </span>
+        </Tooltip>
+      )}
     </div>
   )
 }
@@ -137,7 +147,6 @@ function EventCard({ event, status, selected, dimmed, justAdded, live, index, on
   const Icon = eventIcons[event.icon]
   const variant = event.variant ?? 'default'
   const pending = isPendingSuggestion(event)
-  const tagCount = (event.reminders?.length ? 1 : 0) + (event.ai ? 1 : 0)
   return (
     <div
       role="button"
@@ -148,7 +157,6 @@ function EventCard({ event, status, selected, dimmed, justAdded, live, index, on
         `variant-${variant}`,
         `status-${status}`,
         pending && 'is-suggested',
-        tagCount === 2 && 'has-two-tags',
         selected && 'is-selected',
         dimmed && 'is-dimmed',
         justAdded && 'just-added',
@@ -244,7 +252,7 @@ function Connector({ status, today, onAdd }) {
   )
 }
 
-function TimelineRow({ deal, statuses, selectedEventId, recentId, live, highlighted, onHover, isDimmed, onSelectEvent, onAddEvent, onToggleDone, onDeleteEvent, onAcceptEvent }) {
+function TimelineRow({ deal, statuses, selectedEventId, recentId, live, highlighted, aligned, onHover, isDimmed, onSelectEvent, onAddEvent, onToggleDone, onDeleteEvent, onAcceptEvent }) {
   const trackRef = useRef()
   const [edges, setEdges] = useState({ left: false, right: false })
   const events = sortedEvents(deal)
@@ -285,11 +293,15 @@ function TimelineRow({ deal, statuses, selectedEventId, recentId, live, highligh
 
   return (
     <div
-      className={`track-wrap ${edges.left ? 'fade-left' : ''} ${edges.right ? 'fade-right' : ''} ${highlighted ? 'is-highlighted' : ''}`}
+      className={`track-wrap ${!aligned && edges.left ? 'fade-left' : ''} ${!aligned && edges.right ? 'fade-right' : ''} ${highlighted ? 'is-highlighted' : ''}`}
       onMouseEnter={() => onHover(deal.id)}
       onMouseLeave={() => onHover(null)}
     >
       <div className="timeline-track" ref={trackRef} onScroll={updateEdges}>
+        {/* Lined up by today: the board sizes this so every row's Today marker sits at the same x,
+            and a row that starts in the future (or has no events) still gets a marker */}
+        {aligned && <span className="align-spacer" />}
+        {aligned && todayAt === 0 && <Connector today />}
         {events.map((event, i) => (
           <div className="track-item" key={event.id}>
             {i > 0 && (
@@ -314,7 +326,7 @@ function TimelineRow({ deal, statuses, selectedEventId, recentId, live, highligh
             />
           </div>
         ))}
-        {events.length > 0 && <Connector today={todayAt === events.length} />}
+        {events.length > 0 && <Connector today={todayAt === events.length && todayAt > 0} />}
         <Tooltip label="Add event at the end">
           <button
             className={`add-event-slot ${events.length ? '' : 'is-first'}`}
@@ -342,13 +354,37 @@ export default function DealsTimeline({
   onToggleDone,
   onDeleteEvent,
   onAcceptEvent,
+  aligned,
 }) {
   // Hovering either the company or its timeline highlights the whole row
   const [hoveredId, setHoveredId] = useState(null)
   const isSelectedDeal = (id) => selection?.dealId === id
+  const scrollRef = useRef()
+
+  // Lined up by today: every row's spacer gets the width that puts its Today marker where the row
+  // with the longest past has it, so the markers form one vertical line and all rows scroll together
+  useLayoutEffect(() => {
+    if (!aligned) return
+    const rows = [...scrollRef.current.querySelectorAll('.timeline-track')].map((track) => ({
+      spacer: track.querySelector('.align-spacer'),
+      marker: track.querySelector('.today-marker'),
+    })).filter((row) => row.spacer && row.marker)
+    rows.forEach((row) => { row.spacer.style.width = '0px' })
+    const past = rows.map((row) => row.marker.getBoundingClientRect().left - row.spacer.getBoundingClientRect().right)
+    const widest = Math.max(0, ...past)
+    rows.forEach((row, i) => { row.spacer.style.width = `${widest - past[i]}px` })
+  }, [aligned, deals])
+
+  // Turning it on brings today into view, a little left of the middle
+  useLayoutEffect(() => {
+    if (!aligned) return
+    const scroller = scrollRef.current
+    const marker = scroller.querySelector('.today-marker')
+    if (marker) scroller.scrollLeft = marker.getBoundingClientRect().left - scroller.getBoundingClientRect().left + scroller.scrollLeft - scroller.clientWidth * 0.4
+  }, [aligned])
 
   return (
-    <section className="board">
+    <section className={`board ${aligned ? 'is-aligned' : ''}`}>
       {/* Fixed company column */}
       <div className="company-col">
         {deals.map((deal, i) => (
@@ -366,8 +402,8 @@ export default function DealsTimeline({
         ))}
       </div>
 
-      {/* Each company's timeline row scrolls horizontally on its own */}
-      <div className="board-scroll">
+      {/* Each company's timeline row scrolls horizontally on its own - or, lined up by today, all together */}
+      <div className="board-scroll" ref={scrollRef}>
         <div className="timeline-area">
           {deals.map((deal) => (
             <TimelineRow
@@ -377,6 +413,7 @@ export default function DealsTimeline({
               recentId={recentId}
               live={live?.events}
               highlighted={hoveredId === deal.id || isSelectedDeal(deal.id)}
+              aligned={aligned}
               onHover={setHoveredId}
               selectedEventId={selection?.type === 'event' && selection.dealId === deal.id ? selection.eventId : null}
               isDimmed={(event) => isEventDimmed(deal, event)}
