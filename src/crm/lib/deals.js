@@ -142,7 +142,15 @@ export const sorters = {
 // Reminder times are local "YYYY-MM-DDTHH:mm" strings (what a datetime-local input produces)
 export const reminderDate = (r) => new Date(r.at)
 
-export const reminderState = (r) => (reminderDate(r) <= now() ? 'sent' : 'scheduled')
+// What the sender recorded wins; WhatsApp reminders past their time are on their way, others
+// (in-app, email and SMS aren't sent yet) count as done once their time has passed
+export const reminderState = (r) => {
+  if (r.status === 'sent' || r.status === 'failed') return r.status
+  if (reminderDate(r) > now()) return 'scheduled'
+  return r.channel === 'whatsapp' ? 'sending' : 'sent'
+}
+
+export const reminderStateLabels = { scheduled: 'Scheduled', sending: 'Sending', sent: 'Sent', failed: 'Not sent' }
 
 export const sortedReminders = (event) =>
   [...(event.reminders ?? [])].sort((a, b) => reminderDate(a) - reminderDate(b))

@@ -1252,6 +1252,13 @@ button {
   color: #374151;
 }
 
+.field-hint {
+  margin: -4px 0 0;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--text-muted);
+}
+
 .field input,
 .field select,
 .field textarea {
@@ -2536,6 +2543,19 @@ button {
 
 .state-scheduled { background: #fff1d6; color: #b45309; }
 .state-sent { background: #f3f4f6; color: var(--text-muted); }
+.state-sending { background: #e8f1fd; color: var(--blue-text); }
+.state-failed { background: var(--red-bg); color: var(--red-text); }
+
+.reminder-item.is-failed .reminder-bell {
+  background: var(--red-bg);
+  color: var(--red-text);
+}
+
+.recipient-picker {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
 
 .reminder-chevron {
   flex-shrink: 0;

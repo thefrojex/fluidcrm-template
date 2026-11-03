@@ -16,7 +16,7 @@ import { useCallback, useEffect, useRef } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { supabase } from '../lib/supabase'
 import { formatValue, parseValue } from './lib/deals.js'
-import { getMe } from './lib/me.js'
+import { getMe, getMyId } from './lib/me.js'
 
 export const boardKey = ['fluidcrm', 'board']
 
@@ -60,17 +60,26 @@ function toEvent(row) {
     ...(row.origin === 'ai' ? { ai: { status: row.ai_review_status, reason: row.ai_reason ?? '' } } : {}),
     reminders: (row.reminders ?? [])
       .filter((r) => r.deleted_at === null && r.status !== 'cancelled')
-      .map((r) => ({
-        id: r.id,
-        at: toLocalInput(r.remind_at),
-        channel: r.channel.replace('_', '-'),
-        recipient: r.recipient_kind === 'user' ? getMe() : r.recipient_label,
-        recipientKind: r.recipient_kind,
-        recipientContactId: r.recipient_contact_id,
-        message: r.message,
-        status: r.status,
-        origin: r.origin,
-      })),
+      .map((r) => {
+        // A reminder for an employee names them (and is sent to them); older ones only had a label
+        const personName = r.recipient_kind === 'user' ? r.recipient_person?.name ?? r.recipient_label ?? getMe() : null
+        return {
+          id: r.id,
+          at: toLocalInput(r.remind_at),
+          // What it was when loaded: a new time schedules it again
+          loadedAt: toLocalInput(r.remind_at),
+          channel: r.channel.replace('_', '-'),
+          recipient: personName ?? r.recipient_label,
+          recipientKind: r.recipient_kind,
+          recipientContactId: r.recipient_contact_id,
+          recipientPersonId: r.recipient_person_id,
+          recipientPersonName: personName,
+          message: r.message,
+          status: r.status,
+          failureReason: r.failure_reason,
+          origin: r.origin,
+        }
+      }),
   }
 }
 
@@ -102,7 +111,8 @@ export async function loadBoard() {
       company:parties!inner (id, name, industry, area:areas (name), profile:company_profiles (logo_key, logo_color)),
       deal_events (id, title, event_type, color_variant, event_date, sort_key, owner_kind, owner_contact_id, owner_automation,
         notes, completed_at, origin, ai_review_status, ai_reason, deleted_at,
-        reminders (id, remind_at, channel, recipient_kind, recipient_contact_id, recipient_label, message, status, origin, deleted_at))`)
+        reminders (id, remind_at, channel, recipient_kind, recipient_contact_id, recipient_person_id, recipient_label, message, status, failure_reason, origin, deleted_at,
+          recipient_person:people!recipient_person_id (name)))`)
     .is('deleted_at', null)
     .eq('status', 'open')
     .order('board_position')
@@ -166,20 +176,25 @@ function eventRow(deal, event) {
 }
 
 function reminderRow(event, reminder) {
-  const toMe = reminder.recipient === getMe()
+  // An employee's reminder keeps its person; one set to "me" is for the signed-in person
+  const forPerson = Boolean(reminder.recipientPersonId) && reminder.recipient === reminder.recipientPersonName
+  const toMe = !forPerson && reminder.recipient === getMe()
   const pending = event.ai?.status === 'pending'
   const at = new Date(reminder.at)
+  // A new time (or a new reminder) is scheduled again; otherwise what the sender recorded stays
+  const rescheduled = reminder.at !== reminder.loadedAt
   return {
     id: reminder.id,
     event_id: event.id,
     remind_at: at.toISOString(),
     channel: reminder.channel.replace('-', '_'),
-    recipient_kind: toMe ? 'user' : reminder.recipientKind === 'contact' ? 'contact' : 'custom',
-    recipient_contact_id: toMe ? null : reminder.recipientContactId ?? null,
+    recipient_kind: forPerson || toMe ? 'user' : reminder.recipientKind === 'contact' ? 'contact' : 'custom',
+    recipient_contact_id: forPerson || toMe ? null : reminder.recipientContactId ?? null,
+    recipient_person_id: forPerson ? reminder.recipientPersonId : toMe ? getMyId() : null,
     recipient_label: reminder.recipient ?? '',
     message: reminder.message ?? '',
-    // Drafts never fire; anything else is scheduled again until the sender (later) marks it sent
-    status: pending ? 'draft' : reminder.status === 'sent' && at <= new Date() ? 'sent' : 'scheduled',
+    status: pending ? 'draft' : rescheduled || !reminder.status || reminder.status === 'draft' ? 'scheduled' : reminder.status,
+    failure_reason: rescheduled ? null : reminder.failureReason ?? null,
     origin: reminder.origin ?? (event.ai ? 'ai' : 'manual'),
     deleted_at: null,
   }

@@ -29,7 +29,7 @@ function App() {
   const member = membership.data;
   if (!member) return <NoAccess email={auth.user.email} />;
 
-  setMe(member.name);
+  setMe(member.name, member.person_id);
   const accountMenu = <AccountMenu member={member} />;
   return (
     <Routes>

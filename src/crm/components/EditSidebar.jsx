@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { X, Trash2, ChevronRight, ChevronDown, Check, AlertCircle, ArrowRight, Sparkles, Bell, Plus, MessageCircle } from 'lucide-react'
 import { companyIcons, eventIcons, eventTypeOptions } from './icons.js'
 import {
-  channelLabel, eventStatuses, formatDay, formatReminderTime, isPendingSuggestion, reminderChannels, reminderState,
+  channelLabel, eventStatuses, formatDay, formatReminderTime, isPendingSuggestion, reminderChannels, reminderState, reminderStateLabels,
   sortedEvents, sortedReminders, todayISO,
 } from '../lib/deals.js'
 import { getMe } from '../lib/me.js'
@@ -80,7 +80,32 @@ function SuggestionBanner({ event, onAccept, onDismiss }) {
   )
 }
 
-const personOwner = (owner) => (['Client', 'Team'].includes(owner) || owner.startsWith('Auto') ? getMe() : owner)
+// Who a reminder is for: the signed-in person, the employee it was already set for, or anyone else
+// by name (kept as a note; only employees' WhatsApp reminders are sent). Reminding other employees
+// waits for the reporting-chain rules.
+function RecipientPicker({ reminder, onChange }) {
+  const me = getMe()
+  const person = reminder.recipientPersonName && reminder.recipientPersonName !== me ? reminder.recipientPersonName : null
+  const choice = reminder.recipient === me ? 'me' : person && reminder.recipient === person ? 'person' : 'other'
+  return (
+    <div className="recipient-picker">
+      <select
+        value={choice}
+        onChange={(e) => {
+          const next = e.target.value
+          onChange({ recipient: next === 'me' ? me : next === 'person' ? person : '' })
+        }}
+      >
+        <option value="me">Me ({me})</option>
+        {person && <option value="person">{person}</option>}
+        <option value="other">Someone else…</option>
+      </select>
+      {choice === 'other' && (
+        <input value={reminder.recipient} placeholder="Their name" autoFocus onChange={(e) => onChange({ recipient: e.target.value })} />
+      )}
+    </div>
+  )
+}
 
 // Reminders make an event a task someone gets nudged about. Rows stay collapsed to a summary
 // (time · channel · recipient · state) and expand to edit.
@@ -96,8 +121,9 @@ function RemindersSection({ event, onChange }) {
     const r = {
       id: crypto.randomUUID(),
       at: `${event.date || todayISO()}T09:00`,
-      channel: 'in-app',
-      recipient: personOwner(event.owner),
+      // WhatsApp reminders are the ones that actually go out
+      channel: 'whatsapp',
+      recipient: getMe(),
       message: event.title ? `Reminder: ${event.title}` : '',
     }
     setReminders([...(event.reminders ?? []), r])
@@ -120,9 +146,12 @@ function RemindersSection({ event, onChange }) {
                   <span className="reminder-bell"><Bell size={14} /></span>
                   <span className="reminder-text">
                     <span className="reminder-time">{formatReminderTime(r)}</span>
-                    <span className="reminder-sub">{channelLabel(r.channel)} to {r.recipient || '—'}</span>
+                    <span className="reminder-sub">
+                      {channelLabel(r.channel)} to {r.recipient === getMe() ? `you (${r.recipient})` : r.recipient || '—'}
+                      {state === 'failed' && r.failureReason ? ` · ${r.failureReason}` : ''}
+                    </span>
                   </span>
-                  <span className={`reminder-state state-${state}`}>{state === 'sent' ? 'Sent' : 'Scheduled'}</span>
+                  <span className={`reminder-state state-${state}`} title={state === 'failed' ? r.failureReason ?? '' : undefined}>{reminderStateLabels[state]}</span>
                   <ChevronDown size={15} className="reminder-chevron" />
                 </button>
                 {open && (
@@ -140,8 +169,11 @@ function RemindersSection({ event, onChange }) {
                       </Field>
                     </div>
                     <Field label="Remind">
-                      <input value={r.recipient} placeholder="Who gets this reminder" onChange={(e) => update(r.id, { recipient: e.target.value })} />
+                      <RecipientPicker reminder={r} onChange={(patch) => update(r.id, patch)} />
                     </Field>
+                    {r.channel === 'whatsapp' && r.recipient !== getMe() && r.recipient !== r.recipientPersonName && (
+                      <p className="field-hint">Only reminders for you, or for the employee they were set for, go out on WhatsApp for now.</p>
+                    )}
                     <Field label="Message">
                       <textarea rows={2} value={r.message} placeholder="What should the reminder say?" onChange={(e) => update(r.id, { message: e.target.value })} />
                     </Field>
