@@ -81,10 +81,12 @@ function toDeal(row) {
     name: row.company.name,
     tag: row.tag.toUpperCase(),
     industry: row.company.industry ?? '',
-    city: row.company.city ?? '',
+    // "City" on the card is the company's area in the workspace's shared data
+    city: row.company.area?.name ?? '',
     value: formatValue(row.value_amount, row.value_currency, row.value_period),
-    logo: row.company.logo_key,
-    logoColor: row.company.logo_color,
+    logo: row.company.profile?.logo_key ?? 'briefcase',
+    logoColor: row.company.profile?.logo_color ?? 'blue',
+    ownerId: row.owner_id,
     position: Number(row.board_position),
     events: row.deal_events
       .filter((e) => e.deleted_at === null)
@@ -96,13 +98,12 @@ function toDeal(row) {
 export async function loadBoard() {
   const { data, error } = await supabase
     .from('deals')
-    .select(`id, tag, status, value_amount, value_currency, value_period, board_position,
-      company:companies!inner (id, name, industry, city, logo_key, logo_color, deleted_at),
+    .select(`id, tag, status, value_amount, value_currency, value_period, board_position, owner_id,
+      company:parties!inner (id, name, industry, area:areas (name), profile:company_profiles (logo_key, logo_color)),
       deal_events (id, title, event_type, color_variant, event_date, sort_key, owner_kind, owner_contact_id, owner_automation,
         notes, completed_at, origin, ai_review_status, ai_reason, deleted_at,
         reminders (id, remind_at, channel, recipient_kind, recipient_contact_id, recipient_label, message, status, origin, deleted_at))`)
     .is('deleted_at', null)
-    .is('company.deleted_at', null)
     .eq('status', 'open')
     .order('board_position')
   if (error) throw error
@@ -113,15 +114,16 @@ export async function loadBoard() {
 
 // ---------- UI → database ----------
 
-function companyRow(deal) {
+// Companies are the workspace's (core); save_company creates or updates the shared record and
+// returns its id, which a new card (with a browser-made id) switches to.
+function companyCall(deal) {
   return {
-    id: deal.companyId,
-    name: deal.name.trim(),
-    industry: deal.industry?.trim() || null,
-    city: deal.city?.trim() || null,
-    logo_key: deal.logo,
-    logo_color: deal.logoColor,
-    deleted_at: null,
+    p_party_id: deal.companyId,
+    p_name: deal.name.trim(),
+    p_industry: deal.industry?.trim() || null,
+    p_city: deal.city?.trim() ?? null,
+    p_logo_key: deal.logo,
+    p_logo_color: deal.logoColor,
   }
 }
 
@@ -187,7 +189,7 @@ const byId = (list) => new Map(list.map((item) => [item.id, item]))
 
 // What changed between two boards, as database writes.
 export function diffBoards(prev, next) {
-  const writes = { companies: [], deals: [], events: [], reminders: [], deleteDeals: [], deleteCompanies: [], deleteEvents: [], dismissEvents: [], deleteReminders: [] }
+  const writes = { companies: [], deals: [], events: [], reminders: [], deleteDeals: [], deleteEvents: [], dismissEvents: [], deleteReminders: [] }
   const prevDeals = byId(prev)
   const nextDeals = byId(next)
   const saved = (deal) => deal.name.trim() !== ''
@@ -196,11 +198,9 @@ export function diffBoards(prev, next) {
     const before = prevDeals.get(deal.id)
     if (!saved(deal)) continue
     if (deal !== before) {
-      const unchangedFields = before && saved(before) && ['name', 'industry', 'city', 'logo', 'logoColor', 'tag', 'value', 'position'].every((k) => before[k] === deal[k])
-      if (!unchangedFields) {
-        writes.companies.push(companyRow(deal))
-        writes.deals.push(dealRow(deal))
-      }
+      const same = (keys) => before && saved(before) && keys.every((k) => before[k] === deal[k])
+      if (!same(['name', 'industry', 'city', 'logo', 'logoColor'])) writes.companies.push(companyCall(deal))
+      if (!same(['companyId', 'tag', 'value', 'position'])) writes.deals.push(dealRow(deal))
     }
     const beforeEvents = byId(before?.events ?? [])
     for (const event of deal.events) {
@@ -224,11 +224,9 @@ export function diffBoards(prev, next) {
       else writes.deleteEvents.push(old.id)
     }
   }
+  // Removing a card removes the deal, never the company: other apps share it
   for (const deal of prev) {
-    if (!nextDeals.has(deal.id) && saved(deal)) {
-      writes.deleteDeals.push(deal.id)
-      writes.deleteCompanies.push(deal.companyId)
-    }
+    if (!nextDeals.has(deal.id) && saved(deal)) writes.deleteDeals.push(deal.id)
   }
   return writes
 }
@@ -254,6 +252,7 @@ function rememberBoard(deals) {
   }
 }
 
+// Returns browser-made company ids that became real ones: { [browserId]: companyId }.
 async function applyWrites(writes) {
   const now = new Date().toISOString()
   const run = async (promise) => {
@@ -268,10 +267,18 @@ async function applyWrites(writes) {
     for (const row of fresh) knownIds.add(row.id)
     rememberOwn(rows.map((row) => row.id))
   }
-  rememberOwn([...writes.deleteReminders, ...writes.dismissEvents, ...writes.deleteEvents, ...writes.deleteDeals, ...writes.deleteCompanies])
+  rememberOwn([...writes.deleteReminders, ...writes.dismissEvents, ...writes.deleteEvents, ...writes.deleteDeals])
+  // Companies first: a new card's deal needs its company's real id.
+  const companyIds = {}
+  for (const call of writes.companies) {
+    const { data, error } = await supabase.rpc('save_company', call)
+    if (error) throw error
+    knownIds.add(data)
+    if (data !== call.p_party_id) companyIds[call.p_party_id] = data
+  }
+  const deals = writes.deals.map((row) => (companyIds[row.company_id] ? { ...row, company_id: companyIds[row.company_id] } : row))
   // Parents before children, deletes last (children of a deleted parent go with it).
-  await save('companies', writes.companies)
-  await save('deals', writes.deals)
+  await save('deals', deals)
   await save('deal_events', writes.events)
   await save('reminders', writes.reminders)
   if (writes.deleteReminders.length) await run(supabase.from('reminders').update({ deleted_at: now }).in('id', writes.deleteReminders))
@@ -281,8 +288,12 @@ async function applyWrites(writes) {
   }
   if (writes.deleteEvents.length) await run(supabase.from('deal_events').update({ deleted_at: now }).in('id', writes.deleteEvents))
   if (writes.deleteDeals.length) await run(supabase.from('deals').update({ deleted_at: now }).in('id', writes.deleteDeals))
-  if (writes.deleteCompanies.length) await run(supabase.from('companies').update({ deleted_at: now }).in('id', writes.deleteCompanies))
+  return companyIds
 }
+
+// A board with browser-made company ids swapped for the real ones.
+const withCompanyIds = (deals, ids) =>
+  !deals || !Object.keys(ids).length ? deals : deals.map((deal) => (ids[deal.companyId] ? { ...deal, companyId: ids[deal.companyId] } : deal))
 
 const isEmpty = (writes) => Object.values(writes).every((list) => list.length === 0)
 
@@ -341,8 +352,9 @@ export function useBoard({ userId, onError, onRemoteChange } = {}) {
       const prev = synced.current ?? []
       const writes = diffBoards(prev, next ?? [])
       try {
-        if (!isEmpty(writes)) await applyWrites(writes)
-        synced.current = next
+        const ids = isEmpty(writes) ? {} : await applyWrites(writes)
+        if (Object.keys(ids).length) queryClient.setQueryData(boardKey, (current) => withCompanyIds(current, ids))
+        synced.current = withCompanyIds(next, ids)
       } catch (error) {
         onError?.(error)
         // The database is the truth: reload it rather than keep a board that didn't save
@@ -403,7 +415,8 @@ export function useBoard({ userId, onError, onRemoteChange } = {}) {
       let nudge = null
       channel = supabase
         .channel(`fluidcrm-activity-${userId}`)
-        .on('postgres_changes', { event: 'INSERT', schema, table: 'activity_log', filter: `user_id=eq.${userId}` }, () => {
+        // Realtime applies the log's access rules, so this only hears about deals this person can see
+        .on('postgres_changes', { event: 'INSERT', schema, table: 'activity_log' }, () => {
           // A WhatsApp action writes a few rows in one go; look once they've all landed
           clearTimeout(nudge)
           nudge = setTimeout(() => checkForChanges.current(), 250)

@@ -1,13 +1,12 @@
 -- What the platform's assistant (WhatsApp) can do in FluidCRM. Platform convention: functions named
 -- agent_*, SECURITY INVOKER (they run as the person, so RLS applies), each with a JSON comment
--- { description, audience, confirm, params }; agent_whoami() returns the caller's role or null.
--- Writes tag their activity_log rows with via = 'whatsapp'. Every write asks the person to
--- confirm first ("confirm": true), so nothing changes without a human yes (AI-AGENTS.md 1).
-
-CREATE OR REPLACE FUNCTION __APP_SCHEMA__.agent_whoami() RETURNS text
-LANGUAGE sql STABLE SECURITY INVOKER SET search_path = __APP_SCHEMA__, pg_temp AS $$
-  SELECT role FROM __APP_SCHEMA__.members WHERE user_id = auth.uid() AND status = 'active'
-$$;
+-- { description, audience, confirm, params }. agent_whoami() comes from core.link_app (the
+-- person's roles here, null for non-members). Writes tag their activity_log rows with
+-- via = 'whatsapp' and reply { "message": "..." }.
+--
+-- Companies are the workspace's (core.parties): a company someone names may already be known from
+-- another app (a Service Desk customer) without a deal here yet; then the deal is opened on that
+-- same company, never a second copy of it.
 
 -- ---------------------------------------------------------------------------------------------
 -- Internal helpers (not agent_*, so the assistant never sees them)
@@ -16,8 +15,8 @@ $$;
 CREATE OR REPLACE FUNCTION __APP_SCHEMA__.require_member() RETURNS void
 LANGUAGE plpgsql STABLE SECURITY INVOKER SET search_path = __APP_SCHEMA__, pg_temp AS $$
 BEGIN
-  IF NOT __APP_SCHEMA__.is_active_member() THEN
-    RAISE EXCEPTION 'You don''t have access to FluidCRM. Ask its admin to add you.' USING ERRCODE = '42501';
+  IF NOT core.is_app_member('__APP_SCHEMA__') THEN
+    RAISE EXCEPTION 'You don''t have access to FluidCRM. Ask the workspace owner to add you.' USING ERRCODE = '42501';
   END IF;
 END $$;
 
@@ -38,25 +37,23 @@ $$;
 CREATE OR REPLACE FUNCTION __APP_SCHEMA__.event_owner_label(e __APP_SCHEMA__.deal_events) RETURNS text
 LANGUAGE sql STABLE SECURITY INVOKER SET search_path = __APP_SCHEMA__, pg_temp AS $$
   SELECT CASE e.owner_kind
-    WHEN 'user' THEN coalesce((SELECT name FROM __APP_SCHEMA__.members WHERE user_id = e.user_id), 'Me')
-    WHEN 'contact' THEN coalesce((SELECT name FROM __APP_SCHEMA__.contacts WHERE id = e.owner_contact_id), 'Client')
+    WHEN 'user' THEN coalesce((SELECT p.name FROM __APP_SCHEMA__.deals d JOIN core.people p ON (p.id = d.owner_id) WHERE d.id = e.deal_id), 'Me')
+    WHEN 'contact' THEN coalesce((SELECT c.name FROM core.contacts c WHERE c.id = e.owner_contact_id), 'Client')
     WHEN 'team' THEN 'Team'
     ELSE 'Auto • ' || initcap(e.owner_automation)
   END
 $$;
 
--- A company name the way people say it: no case, spacing, punctuation, or "Pvt Ltd"-type words.
+-- A name without spaces, for "Gupta Ent" vs "GuptaEnterprises"-style comparisons on top of
+-- core.normalize_name (which already drops case, punctuation and Pvt Ltd-type words).
 CREATE OR REPLACE FUNCTION __APP_SCHEMA__.name_key(t text) RETURNS text
 LANGUAGE sql IMMUTABLE AS $$
-  SELECT regexp_replace(
-    regexp_replace(lower(coalesce(t, '')), '\m(pvt|private|ltd|limited|llp|inc|co|company|corp|corporation|the|and)\M|&', ' ', 'g'),
-    '[^a-z0-9]', '', 'g')
+  SELECT replace(coalesce(core.normalize_name(t), ''), ' ', '')
 $$;
 
--- The deal for a company the person named, matched the forgiving way people say names: exact
--- first, then ignoring case / spacing / "Pvt Ltd", then a shortened or longer form ("Meridian Tech"
--- for Meridian Technologies, "Astra Healthcare" for Astra Health), then the same first word. At
--- each step one match wins and several ask which; null when nothing matches.
+-- The open deal for a company the person named, matched the forgiving way people say names: exact
+-- first, then ignoring case / spacing / "Pvt Ltd", then a shortened or longer form, then the same
+-- first word. At each step one match wins and several ask which; null when no deal matches.
 CREATE OR REPLACE FUNCTION __APP_SCHEMA__.resolve_deal(company text) RETURNS uuid
 LANGUAGE plpgsql STABLE SECURITY INVOKER SET search_path = __APP_SCHEMA__, pg_temp AS $$
 DECLARE
@@ -69,8 +66,8 @@ BEGIN
   IF q = '' THEN RETURN NULL; END IF;
   FOR tier IN 1..4 LOOP
     SELECT array_agg(d.id), string_agg(c.name, ', ' ORDER BY c.name) INTO found, names
-    FROM __APP_SCHEMA__.deals d JOIN __APP_SCHEMA__.companies c ON (c.id = d.company_id)
-    WHERE d.deleted_at IS NULL AND c.deleted_at IS NULL AND CASE tier
+    FROM __APP_SCHEMA__.deals d JOIN core.parties c ON (c.id = d.company_id)
+    WHERE d.deleted_at IS NULL AND d.status = 'open' AND CASE tier
       WHEN 1 THEN lower(c.name) = lower(btrim(company))
       WHEN 2 THEN __APP_SCHEMA__.name_key(c.name) = q
       WHEN 3 THEN length(q) >= 4 AND (__APP_SCHEMA__.name_key(c.name) LIKE '%' || q || '%'
@@ -79,13 +76,30 @@ BEGIN
     END;
     IF coalesce(array_length(found, 1), 0) = 1 THEN RETURN found[1]; END IF;
     IF coalesce(array_length(found, 1), 0) > 1 THEN
-      RAISE EXCEPTION 'Several companies match "%": %. Which one?', company, names;
+      RAISE EXCEPTION 'Several deals match "%": %. Which one?', company, names;
     END IF;
   END LOOP;
   RETURN NULL;
 END $$;
 
--- When nothing matched: the closest names on their board, for the assistant to offer or pick from.
+-- A company the workspace already knows (from any app) that has no open deal here: the best name
+-- match from core.find_parties, if exactly one is clearly it.
+CREATE OR REPLACE FUNCTION __APP_SCHEMA__.resolve_known_company(company text) RETURNS uuid
+LANGUAGE plpgsql STABLE SECURITY INVOKER SET search_path = __APP_SCHEMA__, pg_temp AS $$
+DECLARE
+  hits uuid[];
+  names text;
+BEGIN
+  SELECT array_agg(id), string_agg(name, ', ') INTO hits, names FROM core.find_parties(company) WHERE match = 'exact';
+  IF coalesce(array_length(hits, 1), 0) = 1 THEN RETURN hits[1]; END IF;
+  IF coalesce(array_length(hits, 1), 0) > 1 THEN RAISE EXCEPTION 'Several companies are called "%": %. Which one?', company, names; END IF;
+  SELECT array_agg(id), string_agg(name, ', ') INTO hits, names FROM core.find_parties(company) WHERE match IN ('starts_with', 'word');
+  IF coalesce(array_length(hits, 1), 0) = 1 THEN RETURN hits[1]; END IF;
+  IF coalesce(array_length(hits, 1), 0) > 1 THEN RAISE EXCEPTION 'Several companies match "%": %. Which one?', company, names; END IF;
+  RETURN NULL;
+END $$;
+
+-- When nothing matched: the closest names the workspace knows, for the assistant to offer or pick from.
 CREATE OR REPLACE FUNCTION __APP_SCHEMA__.no_such_company(company text) RETURNS void
 LANGUAGE plpgsql STABLE SECURITY INVOKER SET search_path = __APP_SCHEMA__, pg_temp AS $$
 DECLARE
@@ -93,12 +107,38 @@ DECLARE
   closest text;
 BEGIN
   SELECT string_agg(name, ', ') INTO closest FROM (
-    SELECT c.name FROM __APP_SCHEMA__.deals d JOIN __APP_SCHEMA__.companies c ON (c.id = d.company_id)
-    WHERE d.deleted_at IS NULL AND c.deleted_at IS NULL
+    SELECT c.name FROM core.parties c WHERE c.status = 'active'
     ORDER BY (left(__APP_SCHEMA__.name_key(c.name), 2) = left(q, 2)) DESC, (left(__APP_SCHEMA__.name_key(c.name), 1) = left(q, 1)) DESC, c.name
     LIMIT 8) x;
-  RAISE EXCEPTION 'There''s no company called "%" on their board. Companies there include: %. If they meant one of these, use its exact name; if it really is a new client, call again with new_company = true.',
+  RAISE EXCEPTION 'There''s no company called "%" in the workspace. Companies it knows include: %. If they meant one of these, use its exact name; if it really is a new client, call again with new_company = true.',
     company, coalesce(closest, 'none yet');
+END $$;
+
+-- The open deal to use for a company: an existing one, a new deal on a company the workspace knows,
+-- or (only when they've said it's new) a new company with a deal. Returns (deal, company, created).
+CREATE OR REPLACE FUNCTION __APP_SCHEMA__.deal_for_company(company text, new_company boolean, OUT deal_id uuid, OUT company_id uuid, OUT created text)
+LANGUAGE plpgsql VOLATILE SECURITY INVOKER SET search_path = __APP_SCHEMA__, pg_temp AS $$
+DECLARE
+  made jsonb;
+BEGIN
+  deal_id := __APP_SCHEMA__.resolve_deal(company);
+  IF deal_id IS NOT NULL THEN
+    SELECT d.company_id INTO company_id FROM __APP_SCHEMA__.deals d WHERE d.id = deal_id;
+    RETURN;
+  END IF;
+  company_id := __APP_SCHEMA__.resolve_known_company(company);
+  IF company_id IS NOT NULL THEN
+    created := 'deal';
+  ELSE
+    -- A name that matches nothing is far more often a different way of saying an existing client
+    -- than a new one: only create it when they've said it's new
+    IF NOT coalesce(new_company, false) THEN PERFORM __APP_SCHEMA__.no_such_company(company); END IF;
+    made := core.create_party(btrim(company), ARRAY['prospect'], p_app => '__APP_SCHEMA__');
+    company_id := (made ->> 'party_id')::uuid;
+    created := CASE WHEN (made ->> 'created')::boolean THEN 'company' ELSE 'deal' END;
+  END IF;
+  INSERT INTO __APP_SCHEMA__.deals (company_id, board_position)
+    VALUES (company_id, coalesce((SELECT min(board_position) FROM __APP_SCHEMA__.deals), 0) - 1) RETURNING id INTO deal_id;
 END $$;
 
 CREATE OR REPLACE FUNCTION __APP_SCHEMA__.check_event_type(t text) RETURNS text
@@ -119,12 +159,15 @@ LANGUAGE sql STABLE SECURITY INVOKER SET search_path = __APP_SCHEMA__, pg_temp A
   SELECT jsonb_build_object(
     'today', __APP_SCHEMA__.today(),
     'deal', jsonb_build_object(
-      'id', d.id, 'company', c.name, 'industry', c.industry, 'city', c.city, 'tag', d.tag, 'status', d.status,
+      'id', d.id, 'company', c.name, 'industry', c.industry, 'area', (SELECT a.name FROM core.areas a WHERE a.id = c.area_id),
+      'owner', (SELECT p.name FROM core.people p WHERE p.id = d.owner_id), 'tag', d.tag, 'status', d.status,
       'value', __APP_SCHEMA__.format_value(d.value_amount, d.value_currency, d.value_period),
       'last_activity_at', d.last_activity_at),
     'contacts', coalesce((
-      SELECT jsonb_agg(jsonb_build_object('id', ct.id, 'name', ct.name, 'job_title', ct.job_title, 'is_decision_maker', ct.is_decision_maker) ORDER BY ct.name)
-      FROM __APP_SCHEMA__.contacts ct WHERE ct.company_id = c.id AND ct.deleted_at IS NULL), '[]'::jsonb),
+      SELECT jsonb_agg(jsonb_build_object('id', ct.id, 'name', ct.name, 'job_title', ct.designation, 'phone', ct.phone_key,
+        'is_decision_maker', coalesce(cp.is_decision_maker, false)) ORDER BY ct.name)
+      FROM core.contacts ct LEFT JOIN __APP_SCHEMA__.contact_profiles cp ON (cp.contact_id = ct.id)
+      WHERE ct.party_id = c.id AND ct.status = 'active'), '[]'::jsonb),
     'events', coalesce((
       SELECT jsonb_agg(jsonb_build_object(
         'id', e.id, 'title', e.title, 'type', e.event_type, 'date', e.event_date, 'days_from_today', s.days_from_today,
@@ -137,7 +180,7 @@ LANGUAGE sql STABLE SECURITY INVOKER SET search_path = __APP_SCHEMA__, pg_temp A
       FROM __APP_SCHEMA__.deal_events e JOIN __APP_SCHEMA__.event_status s ON (s.id = e.id)
       WHERE e.deal_id = d.id), '[]'::jsonb)
   )
-  FROM __APP_SCHEMA__.deals d JOIN __APP_SCHEMA__.companies c ON (c.id = d.company_id)
+  FROM __APP_SCHEMA__.deals d JOIN core.parties c ON (c.id = d.company_id)
   WHERE d.id = target AND d.deleted_at IS NULL
 $$;
 
@@ -152,12 +195,12 @@ $$;
 -- ---------------------------------------------------------------------------------------------
 
 CREATE OR REPLACE FUNCTION __APP_SCHEMA__.agent_find_deals(query text DEFAULT NULL)
-RETURNS TABLE (deal_id uuid, company text, industry text, city text, tag text, value text, done int, total int, overdue int, next_event text, next_event_date date, pending_suggestions int, contacts text)
+RETURNS TABLE (deal_id uuid, company text, industry text, area text, owner text, tag text, value text, done int, total int, overdue int, next_event text, next_event_date date, pending_suggestions int, contacts text)
 LANGUAGE plpgsql STABLE SECURITY INVOKER SET search_path = __APP_SCHEMA__, pg_temp AS $$
 BEGIN
   PERFORM __APP_SCHEMA__.require_member();
   RETURN QUERY
-  SELECT d.id, c.name, c.industry, c.city, d.tag,
+  SELECT d.id, c.name, c.industry, a.name, p.name, d.tag,
     __APP_SCHEMA__.format_value(d.value_amount, d.value_currency, d.value_period),
     count(*) FILTER (WHERE s.status = 'done')::int,
     count(*) FILTER (WHERE s.status IN ('done', 'overdue', 'next', 'upcoming'))::int,
@@ -165,23 +208,25 @@ BEGIN
     max(e.title) FILTER (WHERE s.status = 'next'),
     max(e.event_date) FILTER (WHERE s.status = 'next'),
     count(*) FILTER (WHERE s.status = 'suggested')::int,
-    (SELECT string_agg(ct.name || coalesce(' (' || ct.job_title || ')', ''), ', ' ORDER BY ct.name) FROM __APP_SCHEMA__.contacts ct WHERE ct.company_id = c.id AND ct.deleted_at IS NULL)
+    (SELECT string_agg(ct.name || coalesce(' (' || ct.designation || ')', ''), ', ' ORDER BY ct.name) FROM core.contacts ct WHERE ct.party_id = c.id AND ct.status = 'active')
   FROM __APP_SCHEMA__.deals d
-  JOIN __APP_SCHEMA__.companies c ON (c.id = d.company_id)
+  JOIN core.parties c ON (c.id = d.company_id)
+  LEFT JOIN core.areas a ON (a.id = c.area_id)
+  LEFT JOIN core.people p ON (p.id = d.owner_id)
   LEFT JOIN __APP_SCHEMA__.deal_events e ON (e.deal_id = d.id AND e.deleted_at IS NULL)
   LEFT JOIN __APP_SCHEMA__.event_status s ON (s.id = e.id)
-  WHERE d.deleted_at IS NULL AND c.deleted_at IS NULL AND d.status = 'open'
+  WHERE d.deleted_at IS NULL AND d.status = 'open'
     AND (query IS NULL OR btrim(query) = ''
       OR c.name ILIKE '%' || btrim(query) || '%' OR __APP_SCHEMA__.name_key(c.name) LIKE '%' || __APP_SCHEMA__.name_key(query) || '%'
       OR (length(__APP_SCHEMA__.name_key(query)) >= 4 AND __APP_SCHEMA__.name_key(query) LIKE __APP_SCHEMA__.name_key(c.name) || '%')
       OR lower(substring(c.name FROM '^[^\s]+')) = lower(substring(btrim(query) FROM '^[^\s]+')) AND length(substring(btrim(query) FROM '^[^\s]+')) >= 4
-      OR c.industry ILIKE '%' || btrim(query) || '%' OR c.city ILIKE '%' || btrim(query) || '%'
-      OR EXISTS (SELECT 1 FROM __APP_SCHEMA__.contacts ct WHERE ct.company_id = c.id AND ct.deleted_at IS NULL AND ct.name ILIKE '%' || btrim(query) || '%'))
-  GROUP BY d.id, c.id
+      OR c.industry ILIKE '%' || btrim(query) || '%' OR a.name ILIKE '%' || btrim(query) || '%' OR p.name ILIKE '%' || btrim(query) || '%'
+      OR EXISTS (SELECT 1 FROM core.contacts ct WHERE ct.party_id = c.id AND ct.status = 'active' AND ct.name ILIKE '%' || btrim(query) || '%'))
+  GROUP BY d.id, c.id, a.name, p.name
   ORDER BY d.board_position, c.name;
 END $$;
 COMMENT ON FUNCTION __APP_SCHEMA__.agent_find_deals(text) IS
-  '{"description": "List open deals with headline numbers (value, progress, overdue count, next event, contacts). Optionally filter by company, industry, city or contact name. Use it to find a deal_id.", "audience": "team", "confirm": false, "params": {"query": "Part of a company, industry, city or contact name; leave out for all deals"}}';
+  '{"description": "List open deals with headline numbers (owner, value, progress, overdue count, next event, contacts). Optionally filter by company, industry, area, salesperson or contact name. Use it to find a deal_id.", "audience": "team", "confirm": false, "params": {"query": "Part of a company, industry, area, salesperson or contact name; leave out for all deals"}}';
 
 CREATE OR REPLACE FUNCTION __APP_SCHEMA__.agent_deal_context(deal_id uuid) RETURNS jsonb
 LANGUAGE plpgsql STABLE SECURITY INVOKER SET search_path = __APP_SCHEMA__, pg_temp AS $$
@@ -194,7 +239,7 @@ BEGIN
   RETURN result;
 END $$;
 COMMENT ON FUNCTION __APP_SCHEMA__.agent_deal_context(uuid) IS
-  '{"description": "Everything about one deal: company, value, contacts, and the whole timeline in order with each event''s status (done, overdue, next, upcoming, suggested), owner, notes and reminders. Event ids from here are what complete/remind actions need.", "audience": "team", "confirm": false, "params": {"deal_id": "From agent_find_deals"}}';
+  '{"description": "Everything about one deal: company, owner, value, contacts, and the whole timeline in order with each event''s status (done, overdue, next, upcoming, suggested), owner, notes and reminders. Event ids from here are what complete/remind actions need.", "audience": "team", "confirm": false, "params": {"deal_id": "From agent_find_deals"}}';
 
 CREATE OR REPLACE FUNCTION __APP_SCHEMA__.agent_my_agenda(days integer DEFAULT 7) RETURNS jsonb
 LANGUAGE plpgsql STABLE SECURITY INVOKER SET search_path = __APP_SCHEMA__, pg_temp AS $$
@@ -207,25 +252,25 @@ BEGIN
     'overdue', coalesce((
       SELECT jsonb_agg(jsonb_build_object('event_id', e.id, 'title', e.title, 'company', c.name, 'date', e.event_date, 'days_late', -s.days_from_today, 'owner', __APP_SCHEMA__.event_owner_label(e)) ORDER BY e.event_date)
       FROM __APP_SCHEMA__.deal_events e JOIN __APP_SCHEMA__.event_status s ON (s.id = e.id)
-      JOIN __APP_SCHEMA__.deals d ON (d.id = e.deal_id) JOIN __APP_SCHEMA__.companies c ON (c.id = d.company_id)
+      JOIN __APP_SCHEMA__.deals d ON (d.id = e.deal_id) JOIN core.parties c ON (c.id = d.company_id)
       WHERE s.status = 'overdue' AND d.deleted_at IS NULL AND d.status = 'open'), '[]'::jsonb),
     'coming_up', coalesce((
       SELECT jsonb_agg(jsonb_build_object('event_id', e.id, 'title', e.title, 'company', c.name, 'date', e.event_date, 'in_days', s.days_from_today, 'is_next_for_deal', s.status = 'next', 'owner', __APP_SCHEMA__.event_owner_label(e)) ORDER BY e.event_date, e.sort_key)
       FROM __APP_SCHEMA__.deal_events e JOIN __APP_SCHEMA__.event_status s ON (s.id = e.id)
-      JOIN __APP_SCHEMA__.deals d ON (d.id = e.deal_id) JOIN __APP_SCHEMA__.companies c ON (c.id = d.company_id)
+      JOIN __APP_SCHEMA__.deals d ON (d.id = e.deal_id) JOIN core.parties c ON (c.id = d.company_id)
       WHERE s.status IN ('next', 'upcoming') AND s.days_from_today BETWEEN 0 AND horizon AND d.deleted_at IS NULL AND d.status = 'open'), '[]'::jsonb),
     'suggestions_to_review', coalesce((
       SELECT jsonb_agg(jsonb_build_object('event_id', e.id, 'title', e.title, 'company', c.name, 'date', e.event_date, 'reason', e.ai_reason) ORDER BY e.event_date)
       FROM __APP_SCHEMA__.deal_events e JOIN __APP_SCHEMA__.event_status s ON (s.id = e.id)
-      JOIN __APP_SCHEMA__.deals d ON (d.id = e.deal_id) JOIN __APP_SCHEMA__.companies c ON (c.id = d.company_id)
+      JOIN __APP_SCHEMA__.deals d ON (d.id = e.deal_id) JOIN core.parties c ON (c.id = d.company_id)
       WHERE s.status = 'suggested' AND d.deleted_at IS NULL), '[]'::jsonb)
   );
 END $$;
 COMMENT ON FUNCTION __APP_SCHEMA__.agent_my_agenda(integer) IS
-  '{"description": "What needs attention: overdue events, events coming up in the next few days, and AI suggestions waiting for review, across all open deals.", "audience": "team", "confirm": false, "params": {"days": "How many days ahead to include (default 7)"}}';
+  '{"description": "What needs attention on the deals they can see (their own and their team''s): overdue events, events coming up in the next few days, and AI suggestions waiting for review.", "audience": "team", "confirm": false, "params": {"days": "How many days ahead to include (default 7)"}}';
 
 -- ---------------------------------------------------------------------------------------------
--- Writes (all confirmed by the person before they run)
+-- Writes
 -- ---------------------------------------------------------------------------------------------
 
 -- The main WhatsApp flow: "I spoke to Rohan at Meridian, ... follow up Monday".
@@ -245,7 +290,7 @@ LANGUAGE plpgsql VOLATILE SECURITY INVOKER SET search_path = __APP_SCHEMA__, pg_
 DECLARE
   target uuid;
   company_row uuid;
-  created_company boolean := false;
+  created text;
   contact uuid;
   new_contact boolean := false;
   kind text := coalesce(__APP_SCHEMA__.check_event_type(interaction_type), 'call');
@@ -263,32 +308,21 @@ BEGIN
   IF next_step IS NOT NULL AND next_step_date IS NULL THEN RAISE EXCEPTION 'When should "%" happen?', next_step; END IF;
   IF next_step_date IS NOT NULL AND next_step_date < __APP_SCHEMA__.today() THEN RAISE EXCEPTION 'The next step''s date has already passed.'; END IF;
 
-  target := __APP_SCHEMA__.resolve_deal(company);
-  IF target IS NULL THEN
-    -- A name that matches nothing is far more often a different way of saying an existing client
-    -- than a new one: only create it when they've said it's new
-    IF NOT coalesce(agent_log_interaction.new_company, false) THEN PERFORM __APP_SCHEMA__.no_such_company(company); END IF;
-    INSERT INTO __APP_SCHEMA__.companies (name) VALUES (btrim(company)) RETURNING id INTO company_row;
-    INSERT INTO __APP_SCHEMA__.deals (company_id, board_position)
-      VALUES (company_row, coalesce((SELECT min(board_position) FROM __APP_SCHEMA__.deals), 0) - 1) RETURNING id INTO target;
-    created_company := true;
-  ELSE
-    SELECT d.company_id INTO company_row FROM __APP_SCHEMA__.deals d WHERE d.id = target;
-  END IF;
+  SELECT f.deal_id, f.company_id, f.created INTO target, company_row, created FROM __APP_SCHEMA__.deal_for_company(company, agent_log_interaction.new_company) f;
 
   IF btrim(coalesce(contact_name, '')) <> '' THEN
-    SELECT ct.id INTO contact FROM __APP_SCHEMA__.contacts ct
-    WHERE ct.company_id = company_row AND ct.deleted_at IS NULL
+    SELECT ct.id INTO contact FROM core.contacts ct
+    WHERE ct.party_id = company_row AND ct.status = 'active'
       AND (lower(ct.name) = lower(btrim(contact_name)) OR ct.name ILIKE btrim(contact_name) || ' %' OR ct.name ILIKE '% ' || btrim(contact_name))
     ORDER BY lower(ct.name) = lower(btrim(contact_name)) DESC LIMIT 1;
     IF contact IS NULL THEN
-      INSERT INTO __APP_SCHEMA__.contacts (company_id, name) VALUES (company_row, btrim(contact_name)) RETURNING id INTO contact;
+      contact := (core.create_contact(btrim(contact_name), NULL, company_row, p_app => '__APP_SCHEMA__') ->> 'contact_id')::uuid;
       new_contact := true;
     END IF;
   END IF;
 
   label := coalesce(nullif(btrim(agent_log_interaction.title), ''),
-    initcap(replace(kind, '_', ' ')) || coalesce(' with ' || (SELECT split_part(name, ' ', 1) FROM __APP_SCHEMA__.contacts WHERE id = contact), ''));
+    initcap(replace(kind, '_', ' ')) || coalesce(' with ' || (SELECT split_part(c.name, ' ', 1) FROM core.contacts c WHERE c.id = contact), ''));
   INSERT INTO __APP_SCHEMA__.deal_events (deal_id, title, event_type, event_date, sort_key, owner_kind, notes, completed_at, origin)
   VALUES (target, label, kind, day, __APP_SCHEMA__.next_sort_key(target, day), 'user', btrim(summary), now(), 'whatsapp')
   RETURNING id INTO logged;
@@ -300,8 +334,8 @@ BEGIN
     RETURNING id INTO next_id;
   END IF;
 
-  reply := 'Logged "' || label || '" on ' || (SELECT name FROM __APP_SCHEMA__.companies WHERE id = company_row)
-    || CASE WHEN created_company THEN ' (new company)' ELSE '' END
+  reply := 'Logged "' || label || '" on ' || (SELECT p.name FROM core.parties p WHERE p.id = company_row)
+    || CASE created WHEN 'company' THEN ' (new company, new deal)' WHEN 'deal' THEN ' (new deal)' ELSE '' END
     || CASE WHEN new_contact THEN ', and added ' || btrim(contact_name) || ' as a contact' ELSE '' END
     || '.' || CASE WHEN next_id IS NOT NULL THEN ' Next step: ' || btrim(next_step) || ' on ' || to_char(next_step_date, 'Dy DD Mon') || '.' ELSE '' END;
   -- A company name ending in "." (Pvt. Ltd.) shouldn't end the sentence twice
@@ -309,7 +343,7 @@ BEGIN
   RETURN jsonb_build_object('message', reply, 'deal_id', target, 'logged_event_id', logged, 'next_event_id', next_id);
 END $$;
 COMMENT ON FUNCTION __APP_SCHEMA__.agent_log_interaction(text, text, text, text, date, text, date, text, text, boolean) IS
-  '{"description": "Record something that already happened with a client - a conversation, a meeting, a PO or payment received, a contract signed: adds a completed event (titled from title, or from the type and contact) with their summary as notes to that company''s timeline, adds the contact if new, and optionally schedules the agreed next step. Works on an existing company; only creates one with new_company = true.", "audience": "team", "confirm": true, "params": {"company": "Company name as they said it", "summary": "What was discussed and agreed, in their words, cleaned up", "contact_name": "Who they spoke to, if mentioned", "interaction_type": "call, meeting, demo, email, lunch, site_visit, negotiation, pricing or another event type (default call)", "happened_on": "YYYY-MM-DD, default today", "next_step": "Short title of the agreed next action, if any", "next_step_date": "YYYY-MM-DD for the next step (required with next_step)", "next_step_type": "Event type for the next step, default same as the interaction", "title": "Short title for what happened if it isn''t just a call or meeting with someone, e.g. PO received, Payment received, Contract signed", "new_company": "true only when they say this is a new client not on the board yet; otherwise leave it out - an unknown name gets back the closest existing companies"}}';
+  '{"description": "Record something that already happened with a client - a conversation, a meeting, a PO or payment received, a contract signed: adds a completed event (titled from title, or from the type and contact) with their summary as notes to that company''s deal, adds the contact if new, and optionally schedules the agreed next step. Uses the company''s open deal, or opens one for a company the workspace already knows; creates a new company only with new_company = true.", "audience": "team", "confirm": true, "params": {"company": "Company name as they said it", "summary": "What was discussed and agreed, in their words, cleaned up", "contact_name": "Who they spoke to, if mentioned", "interaction_type": "call, meeting, demo, email, lunch, site_visit, negotiation, pricing or another event type (default call)", "happened_on": "YYYY-MM-DD, default today", "next_step": "Short title of the agreed next action, if any", "next_step_date": "YYYY-MM-DD for the next step (required with next_step)", "next_step_type": "Event type for the next step, default same as the interaction", "title": "Short title for what happened if it isn''t just a call or meeting with someone, e.g. PO received, Payment received, Contract signed", "new_company": "true only when they say this is a new client the workspace doesn''t know yet; otherwise leave it out - an unknown name gets back the closest existing companies"}}';
 
 CREATE OR REPLACE FUNCTION __APP_SCHEMA__.agent_add_event(deal_id uuid, title text, event_date date, event_type text DEFAULT 'call', notes text DEFAULT NULL)
 RETURNS jsonb
@@ -369,15 +403,17 @@ BEGIN
     tag = coalesce(lower(agent_update_deal.tag), deals.tag),
     status = coalesce(lower(agent_update_deal.status), deals.status),
     value_amount = coalesce(agent_update_deal.value_amount, deals.value_amount),
-    value_currency = CASE WHEN agent_update_deal.value_amount IS NOT NULL THEN coalesce(deals.value_currency, (SELECT currency FROM __APP_SCHEMA__.members WHERE user_id = auth.uid())) ELSE deals.value_currency END,
+    value_currency = CASE WHEN agent_update_deal.value_amount IS NOT NULL THEN coalesce(deals.value_currency, (SELECT o.currency FROM core.organisation o)) ELSE deals.value_currency END,
     value_period = CASE WHEN agent_update_deal.value_amount IS NOT NULL THEN period ELSE deals.value_period END
   WHERE id = d.id
   RETURNING * INTO d;
-  RETURN jsonb_build_object('message', 'Updated ' || (SELECT name FROM __APP_SCHEMA__.companies WHERE id = d.company_id) || ': ' || upper(d.tag)
+  -- Winning a deal makes the company a customer of the business, in every app
+  IF d.status = 'won' THEN PERFORM core.set_party_role(d.company_id, 'customer', true, '__APP_SCHEMA__'); END IF;
+  RETURN jsonb_build_object('message', 'Updated ' || (SELECT p.name FROM core.parties p WHERE p.id = d.company_id) || ': ' || upper(d.tag)
     || coalesce(', ' || __APP_SCHEMA__.format_value(d.value_amount, d.value_currency, d.value_period), '') || CASE WHEN d.status <> 'open' THEN ', ' || d.status ELSE '' END || '.');
 END $$;
 COMMENT ON FUNCTION __APP_SCHEMA__.agent_update_deal(uuid, text, numeric, text, text) IS
-  '{"description": "Change a deal''s tag (hot/warm/cold/enterprise), value, or status (open/won/lost - won and lost take it off the board). Only pass what changes.", "audience": "team", "confirm": true, "params": {"deal_id": "From agent_find_deals", "tag": "hot, warm, cold or enterprise", "value_amount": "Full amount in rupees, e.g. 4500000 for 45 lakh", "value_period": "yearly (default), monthly or one_time", "status": "open, won or lost"}}';
+  '{"description": "Change a deal''s tag (hot/warm/cold/enterprise), value, or status (open/won/lost - won and lost take it off the board; won makes the company a customer). Only pass what changes.", "audience": "team", "confirm": true, "params": {"deal_id": "From agent_find_deals", "tag": "hot, warm, cold or enterprise", "value_amount": "Full amount in rupees, e.g. 4500000 for 45 lakh", "value_period": "yearly (default), monthly or one_time", "status": "open, won or lost"}}';
 
 CREATE OR REPLACE FUNCTION __APP_SCHEMA__.agent_add_reminder(event_id uuid, remind_at timestamptz, message text, channel text DEFAULT 'whatsapp')
 RETURNS jsonb
@@ -385,7 +421,7 @@ LANGUAGE plpgsql VOLATILE SECURITY INVOKER SET search_path = __APP_SCHEMA__, pg_
 DECLARE
   e __APP_SCHEMA__.deal_events;
   ch text := replace(lower(coalesce(channel, 'whatsapp')), '-', '_');
-  tz text := coalesce((SELECT timezone FROM __APP_SCHEMA__.members WHERE user_id = auth.uid()), 'Asia/Kolkata');
+  tz text := coalesce((SELECT o.timezone FROM core.organisation o), 'Asia/Kolkata');
 BEGIN
   PERFORM __APP_SCHEMA__.require_member();
   PERFORM set_config('app.via', 'whatsapp', true);
@@ -394,7 +430,7 @@ BEGIN
   IF ch NOT IN ('in_app', 'email', 'whatsapp', 'sms') THEN RAISE EXCEPTION 'Channel must be whatsapp, in_app, email or sms.'; END IF;
   IF remind_at <= now() THEN RAISE EXCEPTION 'That time has already passed.'; END IF;
   INSERT INTO __APP_SCHEMA__.reminders (event_id, remind_at, channel, recipient_kind, recipient_label, message, status, origin)
-  VALUES (e.id, remind_at, ch, 'user', coalesce((SELECT name FROM __APP_SCHEMA__.members WHERE user_id = auth.uid()), 'Me'), btrim(coalesce(message, 'Reminder: ' || e.title)),
+  VALUES (e.id, remind_at, ch, 'user', coalesce((SELECT p.name FROM core.people p WHERE p.id = core.me()), 'Me'), btrim(coalesce(message, 'Reminder: ' || e.title)),
     CASE WHEN e.ai_review_status = 'pending' THEN 'draft' ELSE 'scheduled' END, 'whatsapp');
   RETURN jsonb_build_object('message', 'I''ll remind you ' || to_char(remind_at AT TIME ZONE tz, 'Dy DD Mon "at" HH24:MI') || ' about "' || e.title || '".');
 END $$;
@@ -449,7 +485,7 @@ BEGIN
   SELECT * INTO e FROM __APP_SCHEMA__.deal_events WHERE id = agent_update_event.event_id AND deleted_at IS NULL;
   IF e.id IS NULL THEN RAISE EXCEPTION 'That event wasn''t found.'; END IF;
   IF e.ai_review_status = 'pending' THEN RAISE EXCEPTION '"%" is still an AI suggestion - accept or dismiss it first.', e.title; END IF;
-  SELECT c.name INTO company FROM __APP_SCHEMA__.deals d JOIN __APP_SCHEMA__.companies c ON (c.id = d.company_id) WHERE d.id = e.deal_id;
+  SELECT c.name INTO company FROM __APP_SCHEMA__.deals d JOIN core.parties c ON (c.id = d.company_id) WHERE d.id = e.deal_id;
 
   IF coalesce(cancel, false) THEN
     IF agent_update_event.title IS NOT NULL OR agent_update_event.event_date IS NOT NULL OR new_type IS NOT NULL OR add_note IS NOT NULL OR coalesce(reopen, false) THEN
@@ -507,8 +543,9 @@ END $$;
 COMMENT ON FUNCTION __APP_SCHEMA__.agent_update_event(uuid, text, date, text, text, boolean, boolean) IS
   '{"description": "Change an existing event on a deal''s timeline: move it to another date (its pending reminders move with it), rename it, change its type, add a note without completing it, reopen one marked done, or remove it from the board (cancel). Only pass what changes.", "audience": "team", "confirm": true, "params": {"event_id": "From agent_deal_context or agent_my_agenda", "title": "New title", "event_date": "New date, YYYY-MM-DD", "event_type": "New type: call, demo, meeting, email, document, contract, pricing, negotiation, site_visit, lunch, closing, ...", "add_note": "Text to add to the event''s notes", "reopen": "true to mark a done event as not done", "cancel": "true to remove the event from the board (on its own, no other changes)"}}';
 
--- Add a contact (e.g. from a photo of a business card): to the named company - created if it's new -
--- or, if someone with that name is already there, fill in what's missing rather than duplicating them.
+-- Add a contact (e.g. from a photo of a business card) at a company. Contacts are the workspace's:
+-- a phone number already on file is the same person; otherwise someone with that name at that
+-- company gets the missing details filled in rather than being added twice.
 CREATE OR REPLACE FUNCTION __APP_SCHEMA__.agent_add_contact(
   company text,
   name text,
@@ -520,63 +557,74 @@ CREATE OR REPLACE FUNCTION __APP_SCHEMA__.agent_add_contact(
 ) RETURNS jsonb
 LANGUAGE plpgsql VOLATILE SECURITY INVOKER SET search_path = __APP_SCHEMA__, pg_temp AS $$
 DECLARE
-  target uuid;
   company_row uuid;
   company_name text;
-  created_company boolean := false;
-  existing __APP_SCHEMA__.contacts;
+  created text;
+  existing core.contacts;
+  made jsonb;
   filled text[] := '{}';
 BEGIN
   PERFORM __APP_SCHEMA__.require_member();
   PERFORM set_config('app.via', 'whatsapp', true);
   IF btrim(coalesce(company, '')) = '' THEN RAISE EXCEPTION 'Which company does % work at?', coalesce(nullif(btrim(name), ''), 'this person'); END IF;
   IF btrim(coalesce(name, '')) = '' THEN RAISE EXCEPTION 'What''s the person''s name?'; END IF;
-  IF email IS NOT NULL AND btrim(email) <> '' AND btrim(email) !~ '^[^@\s]+@[^@\s]+\.[^@\s]+$' THEN RAISE EXCEPTION '"%" doesn''t look like an email address.', email; END IF;
+  IF agent_add_contact.email IS NOT NULL AND btrim(agent_add_contact.email) <> '' AND btrim(agent_add_contact.email) !~ '^[^@\s]+@[^@\s]+\.[^@\s]+$' THEN RAISE EXCEPTION '"%" doesn''t look like an email address.', agent_add_contact.email; END IF;
 
-  target := __APP_SCHEMA__.resolve_deal(company);
-  IF target IS NULL THEN
-    IF NOT coalesce(agent_add_contact.new_company, false) THEN PERFORM __APP_SCHEMA__.no_such_company(company); END IF;
-    INSERT INTO __APP_SCHEMA__.companies (name) VALUES (btrim(company)) RETURNING id INTO company_row;
-    INSERT INTO __APP_SCHEMA__.deals (company_id, board_position)
-      VALUES (company_row, coalesce((SELECT min(board_position) FROM __APP_SCHEMA__.deals), 0) - 1);
-    created_company := true;
-  ELSE
-    SELECT d.company_id INTO company_row FROM __APP_SCHEMA__.deals d WHERE d.id = target;
+  -- The company: its deal's, one the workspace knows, or (only if they said so) a new one
+  SELECT d.company_id INTO company_row FROM __APP_SCHEMA__.deals d WHERE d.id = __APP_SCHEMA__.resolve_deal(company);
+  IF company_row IS NULL THEN company_row := __APP_SCHEMA__.resolve_known_company(company); END IF;
+  IF company_row IS NULL THEN
+    SELECT f.company_id, f.created INTO company_row, created FROM __APP_SCHEMA__.deal_for_company(company, agent_add_contact.new_company) f;
   END IF;
-  SELECT c.name INTO company_name FROM __APP_SCHEMA__.companies c WHERE c.id = company_row;
+  SELECT p.name INTO company_name FROM core.parties p WHERE p.id = company_row;
 
-  SELECT * INTO existing FROM __APP_SCHEMA__.contacts ct
-  WHERE ct.company_id = company_row AND ct.deleted_at IS NULL AND lower(ct.name) = lower(btrim(agent_add_contact.name));
+  SELECT * INTO existing FROM core.contacts ct
+  WHERE ct.status = 'active' AND (
+    (nullif(btrim(agent_add_contact.phone), '') IS NOT NULL AND ct.phone_key = core.normalize_phone(agent_add_contact.phone))
+    OR (ct.party_id = company_row AND lower(ct.name) = lower(btrim(agent_add_contact.name))))
+  ORDER BY (ct.phone_key = core.normalize_phone(agent_add_contact.phone)) DESC NULLS LAST LIMIT 1;
 
   IF existing.id IS NULL THEN
-    INSERT INTO __APP_SCHEMA__.contacts (company_id, name, job_title, email, phone, is_decision_maker)
-    VALUES (company_row, btrim(agent_add_contact.name), nullif(btrim(job_title), ''), nullif(btrim(email), ''), nullif(btrim(phone), ''), coalesce(is_decision_maker, false));
+    made := core.create_contact(btrim(agent_add_contact.name), nullif(btrim(agent_add_contact.phone), ''), company_row, nullif(btrim(agent_add_contact.email), ''), nullif(btrim(agent_add_contact.job_title), ''), p_app => '__APP_SCHEMA__');
+    IF agent_add_contact.is_decision_maker IS NOT NULL THEN
+      INSERT INTO __APP_SCHEMA__.contact_profiles (contact_id, is_decision_maker) VALUES ((made ->> 'contact_id')::uuid, agent_add_contact.is_decision_maker)
+      ON CONFLICT (contact_id) DO UPDATE SET is_decision_maker = EXCLUDED.is_decision_maker;
+    END IF;
     RETURN jsonb_build_object('message', regexp_replace('Added ' || btrim(agent_add_contact.name)
-      || coalesce(' (' || nullif(btrim(job_title), '') || ')', '') || ' to ' || company_name
-      || CASE WHEN created_company THEN ' - a new company on your board' ELSE '' END || '.', '\.\.$', '.'));
+      || coalesce(' (' || nullif(btrim(agent_add_contact.job_title), '') || ')', '') || ' to ' || company_name
+      || CASE created WHEN 'company' THEN ' - a new company, with a deal on your board' WHEN 'deal' THEN ' - with a new deal on your board' ELSE '' END || '.', '\.\.$', '.'));
   END IF;
 
-  IF existing.job_title IS NULL AND nullif(btrim(job_title), '') IS NOT NULL THEN filled := filled || 'job title'::text; END IF;
-  IF existing.email IS NULL AND nullif(btrim(email), '') IS NOT NULL THEN filled := filled || 'email'::text; END IF;
-  IF existing.phone IS NULL AND nullif(btrim(phone), '') IS NOT NULL THEN filled := filled || 'phone'::text; END IF;
-  IF cardinality(filled) = 0 AND is_decision_maker IS NULL THEN
-    RETURN jsonb_build_object('message', existing.name || ' is already a contact at ' || company_name || ' - nothing new to add.');
+  IF existing.designation IS NULL AND nullif(btrim(agent_add_contact.job_title), '') IS NOT NULL THEN filled := filled || 'job title'::text; END IF;
+  IF existing.email IS NULL AND nullif(btrim(agent_add_contact.email), '') IS NOT NULL THEN filled := filled || 'email'::text; END IF;
+  IF existing.phone_key IS NULL AND nullif(btrim(agent_add_contact.phone), '') IS NOT NULL THEN filled := filled || 'phone'::text; END IF;
+  IF cardinality(filled) = 0 AND agent_add_contact.is_decision_maker IS NULL THEN
+    RETURN jsonb_build_object('message', existing.name || ' is already a contact at ' || coalesce((SELECT p.name FROM core.parties p WHERE p.id = existing.party_id), company_name) || ' - nothing new to add.');
   END IF;
-  UPDATE __APP_SCHEMA__.contacts SET
-    job_title = coalesce(contacts.job_title, nullif(btrim(agent_add_contact.job_title), '')),
-    email = coalesce(contacts.email, nullif(btrim(agent_add_contact.email), '')),
-    phone = coalesce(contacts.phone, nullif(btrim(agent_add_contact.phone), '')),
-    is_decision_maker = coalesce(agent_add_contact.is_decision_maker, contacts.is_decision_maker)
-  WHERE id = existing.id;
-  RETURN jsonb_build_object('message', existing.name || ' was already a contact at ' || company_name
+  PERFORM core.update_contact(existing.id, jsonb_strip_nulls(jsonb_build_object(
+    'designation', CASE WHEN existing.designation IS NULL THEN nullif(btrim(agent_add_contact.job_title), '') END,
+    'email', CASE WHEN existing.email IS NULL THEN nullif(btrim(agent_add_contact.email), '') END,
+    'phone', CASE WHEN existing.phone_key IS NULL THEN nullif(btrim(agent_add_contact.phone), '') END,
+    'party_id', CASE WHEN existing.party_id IS NULL THEN company_row END)), '__APP_SCHEMA__');
+  IF agent_add_contact.is_decision_maker IS NOT NULL THEN
+    INSERT INTO __APP_SCHEMA__.contact_profiles (contact_id, is_decision_maker) VALUES (existing.id, agent_add_contact.is_decision_maker)
+    ON CONFLICT (contact_id) DO UPDATE SET is_decision_maker = EXCLUDED.is_decision_maker;
+  END IF;
+  RETURN jsonb_build_object('message', existing.name || ' was already a contact at ' || coalesce((SELECT p.name FROM core.parties p WHERE p.id = existing.party_id), company_name)
     || CASE WHEN cardinality(filled) > 0 THEN ' - added their ' || array_to_string(filled, ', ') ELSE ' - updated them' END || '.');
 END $$;
 COMMENT ON FUNCTION __APP_SCHEMA__.agent_add_contact(text, text, text, text, text, boolean, boolean) IS
-  '{"description": "Add a person as a contact at a company - for example from a photo of their business card. Works on an existing company; creates one only with new_company = true (a business card from someone new). If the person is already there, fills in missing details instead of adding them twice.", "audience": "team", "confirm": true, "params": {"company": "Company name", "name": "Full name", "job_title": "Title, if known", "email": "Email, if known", "phone": "Phone with country code, if known", "is_decision_maker": "true if they decide on the purchase (e.g. CFO, owner, director)", "new_company": "true only when the company is new to them (not on the board yet); an unknown name otherwise gets back the closest existing companies"}}';
+  '{"description": "Add a person as a contact at a company - for example from a photo of their business card. Works on a company the workspace knows; creates one only with new_company = true (a business card from someone new). If the person is already on file (same phone, or same name at that company), fills in missing details instead of adding them twice.", "audience": "team", "confirm": true, "params": {"company": "Company name", "name": "Full name", "job_title": "Title, if known", "email": "Email, if known", "phone": "Phone with country code, if known", "is_decision_maker": "true if they decide on the purchase (e.g. CFO, owner, director)", "new_company": "true only when the company is new to the business; an unknown name otherwise gets back the closest existing companies"}}';
 
 -- Functions are executable by PUBLIC (which includes signed-out visitors) unless revoked. Only
--- signed-in people may call anything here; the internal seed and trigger functions not even them.
+-- signed-in people may call anything here; the trigger functions not even them.
 REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA __APP_SCHEMA__ FROM PUBLIC, anon;
 GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA __APP_SCHEMA__ TO authenticated, service_role;
-REVOKE EXECUTE ON FUNCTION __APP_SCHEMA__.seed_demo_for(uuid) FROM authenticated;
 REVOKE EXECUTE ON FUNCTION __APP_SCHEMA__.log_activity() FROM authenticated;
+REVOKE EXECUTE ON FUNCTION __APP_SCHEMA__.stamp_closed() FROM authenticated;
+-- The demo is loaded by the platform (as postgres), never from the app
+REVOKE EXECUTE ON FUNCTION __APP_SCHEMA__.load_demo() FROM authenticated, service_role;
+REVOKE EXECUTE ON FUNCTION __APP_SCHEMA__.unload_demo() FROM authenticated, service_role;
+REVOKE EXECUTE ON FUNCTION __APP_SCHEMA__.demo_deal(integer, text, text, numeric, text, integer, text, integer) FROM authenticated, service_role;
+REVOKE EXECUTE ON FUNCTION __APP_SCHEMA__.demo_event(uuid, text, text, integer, boolean, integer, text, integer, text, text) FROM authenticated, service_role;
+REVOKE EXECUTE ON FUNCTION __APP_SCHEMA__.demo_reminder(uuid, integer, time, text, text, integer) FROM authenticated, service_role;

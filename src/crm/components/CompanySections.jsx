@@ -4,7 +4,8 @@ import { Check, MessageCircle, Pencil, Plus, Star, Trash2, X } from 'lucide-reac
 import { supabase } from '../../lib/supabase'
 
 // Contacts at a company: who the assistant matches "I spoke to Rohan" against, and who an event
-// owned by "Client" is.
+// owned by "Client" is. They're the workspace's contacts (core), shared with every app; the
+// decision-maker flag is the CRM's own (contact_profiles).
 export function CompanyContacts({ companyId }) {
   const queryClient = useQueryClient()
   const key = ['fluidcrm', 'contacts', companyId]
@@ -13,12 +14,11 @@ export function CompanyContacts({ companyId }) {
     queryFn: async () => {
       const { data, error } = await supabase
         .from('contacts')
-        .select('id, name, job_title, email, phone, is_decision_maker')
-        .eq('company_id', companyId)
-        .is('deleted_at', null)
+        .select('id, name, designation, email, phone, profile:contact_profiles (is_decision_maker)')
+        .eq('party_id', companyId)
         .order('name')
       if (error) throw error
-      return data
+      return data.map(({ designation, profile, ...contact }) => ({ ...contact, job_title: designation, is_decision_maker: Boolean(profile?.is_decision_maker) }))
     },
   })
   const [editing, setEditing] = useState(null) // contact id, 'new' or null
@@ -26,16 +26,25 @@ export function CompanyContacts({ companyId }) {
 
   const save = useMutation({
     mutationFn: async (contact) => {
-      const row = {
+      const fields = {
         name: contact.name.trim(),
-        job_title: contact.job_title?.trim() || null,
+        designation: contact.job_title?.trim() || null,
         email: contact.email?.trim() || null,
         phone: contact.phone?.trim() || null,
-        is_decision_maker: Boolean(contact.is_decision_maker),
       }
-      const { error } = contact.id
-        ? await supabase.from('contacts').update(row).eq('id', contact.id)
-        : await supabase.from('contacts').insert({ ...row, company_id: companyId })
+      let id = contact.id
+      if (id) {
+        const { error } = await supabase.rpc('update_contact', { p_contact_id: id, p_changes: fields })
+        if (error) throw error
+      } else {
+        // A phone number the workspace already has is that same person: they're linked, not copied
+        const { data, error } = await supabase.rpc('create_contact', {
+          p_name: fields.name, p_phone: fields.phone, p_party_id: companyId, p_email: fields.email, p_designation: fields.designation,
+        })
+        if (error) throw error
+        id = data.contact_id
+      }
+      const { error } = await supabase.from('contact_profiles').upsert({ contact_id: id, is_decision_maker: Boolean(contact.is_decision_maker) })
       if (error) throw error
     },
     onSuccess: () => {
@@ -45,7 +54,7 @@ export function CompanyContacts({ companyId }) {
   })
   const remove = useMutation({
     mutationFn: async (id) => {
-      const { error } = await supabase.from('contacts').update({ deleted_at: new Date().toISOString() }).eq('id', id)
+      const { error } = await supabase.rpc('update_contact', { p_contact_id: id, p_changes: { status: 'archived' } })
       if (error) throw error
     },
     onSuccess: () => queryClient.invalidateQueries({ queryKey: key }),
@@ -101,7 +110,7 @@ export function CompanyContacts({ companyId }) {
               <button
                 type="button"
                 className="icon-btn"
-                onClick={() => window.confirm(`Remove ${c.name} from this company?`) && remove.mutate(c.id)}
+                onClick={() => window.confirm(`Remove ${c.name}? They leave the workspace’s contacts, so every app stops showing them.`) && remove.mutate(c.id)}
                 aria-label={`Remove ${c.name}`}
               >
                 <Trash2 size={14} />

@@ -1,12 +1,12 @@
 import { useEffect, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { useQueryClient } from '@tanstack/react-query'
-import { AlertCircle, ChevronDown, Inbox, KeyRound, LogOut, RotateCcw, Users, X } from 'lucide-react'
+import { AlertCircle, ChevronDown, Inbox, KeyRound, LogOut, Users, X } from 'lucide-react'
 import { supabase } from '../lib/supabase'
-import { changePassword, signOut, useResetDemo } from './session.js'
+import { changePassword, signOut } from './session.js'
 
-// Sign-in only: there's no sign-up. The CRM's admin creates logins (Team page), and people who
-// already have a workspace login use that one.
+// Sign-in only: there's no sign-up. Employees have one workspace login for every app; the
+// workspace owner adds them (console) and gives them access to the CRM.
 export function SignIn() {
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
@@ -42,13 +42,13 @@ export function SignIn() {
         </label>
         {error && <span className="field-error"><AlertCircle size={13} /> {error}</span>}
         <button type="submit" className="btn-primary auth-submit" disabled={busy}>{busy ? 'Signing in…' : 'Sign in'}</button>
-        <p className="auth-note">No account? Ask your CRM admin to add you.</p>
+        <p className="auth-note">No login? Ask the workspace owner to add you.</p>
       </form>
     </main>
   )
 }
 
-export function NoAccess({ email, disabled }) {
+export function NoAccess({ email }) {
   const queryClient = useQueryClient()
   return (
     <main className="auth-page">
@@ -56,14 +56,12 @@ export function NoAccess({ email, disabled }) {
         <div className="auth-brand">
           <div className="brand-icon"><Inbox size={20} strokeWidth={2.2} /></div>
           <div>
-            <div className="auth-title">{disabled ? 'Your access is paused' : 'You don’t have access yet'}</div>
+            <div className="auth-title">You don’t have access yet</div>
             <div className="auth-sub">{email}</div>
           </div>
         </div>
         <p className="auth-note auth-note-left">
-          {disabled
-            ? 'The CRM’s admin has turned off your access. Ask them to turn it back on.'
-            : 'You’re signed in, but this CRM’s admin hasn’t added you. Ask them to add you on the Team page.'}
+          You’re signed in, but you aren’t a member of FluidCRM. Ask the workspace owner or the CRM’s admin to add you.
         </p>
         <button type="button" className="btn-secondary auth-submit" onClick={() => signOut(queryClient)}>
           <LogOut size={15} /> Sign out
@@ -125,7 +123,6 @@ export function AccountMenu({ member }) {
   const queryClient = useQueryClient()
   const [open, setOpen] = useState(false)
   const [changing, setChanging] = useState(false)
-  const reset = useResetDemo()
   const wrapRef = useRef()
 
   useEffect(() => {
@@ -150,23 +147,12 @@ export function AccountMenu({ member }) {
         <div className="popover popover-account" role="menu">
           <div className="popover-section">
             <div className="account-name">{member.name}</div>
-            <div className="account-email">{member.email}{member.role === 'admin' ? ' · Admin' : ''}</div>
+            <div className="account-email">{member.email}{member.role === 'admin' ? ' · Admin' : member.sees_all ? ' · Sales manager' : ''}</div>
           </div>
           <div className="popover-section">
             {member.role === 'admin' && (
               <Link className="popover-option" to="/team" onClick={() => setOpen(false)}><span><Users size={15} /> Team</span></Link>
             )}
-            <button
-              className="popover-option"
-              disabled={reset.isPending}
-              onClick={() => {
-                if (window.confirm('Reset your board to the sample deals? Everything you changed on your board is replaced. Other people’s boards aren’t touched.')) {
-                  reset.mutate(undefined, { onSettled: () => setOpen(false) })
-                }
-              }}
-            >
-              <span><RotateCcw size={15} /> {reset.isPending ? 'Resetting…' : 'Reset demo data'}</span>
-            </button>
             <button className="popover-option" onClick={() => { setChanging(true); setOpen(false) }}>
               <span><KeyRound size={15} /> Change password</span>
             </button>
@@ -174,7 +160,6 @@ export function AccountMenu({ member }) {
               <span><LogOut size={15} /> Sign out</span>
             </button>
           </div>
-          {reset.error && <p className="field-error popover-error">{reset.error.message}</p>}
         </div>
       )}
       {changing && <ChangePasswordDialog onClose={() => setChanging(false)} />}

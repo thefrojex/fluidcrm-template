@@ -1,36 +1,32 @@
 import { useState } from 'react'
 import { Link } from 'react-router-dom'
-import { ArrowLeft, Copy, KeyRound, UserPlus, Users } from 'lucide-react'
-import { useMemberAction, useMembers } from './session.js'
+import { ArrowLeft, UserPlus, Users } from 'lucide-react'
+import { useMembers, usePeople, useSetMember } from './session.js'
 
-// The admin's member list. Everyone here has their own private board; being on this list (and
-// active) is what lets someone use the CRM - in the app, and from WhatsApp if they're also a
-// workspace employee with their phone connected in the workspace portal.
+// The admin's member list. Membership is the workspace's (core): anyone on the workspace's
+// employee list can be added here, and the same list and roles show in the console. Members see
+// their own deals and their team's; sales managers and admins see every deal. Members can also use
+// FluidCRM from WhatsApp once they connect their phone in the workspace portal.
+const roleLabels = { admin: 'Admin', sales_manager: 'Sales manager' }
+
 export default function TeamPage({ me, accountMenu }) {
   const members = useMembers()
-  const action = useMemberAction()
-  const [email, setEmail] = useState('')
-  const [name, setName] = useState('')
-  const [handover, setHandover] = useState(null) // { email, password }
-  const [notice, setNotice] = useState(null)
+  const people = usePeople()
+  const setMember = useSetMember()
+  const [adding, setAdding] = useState('')
 
-  const run = (body, onDone) =>
-    action.mutate(body, {
-      onSuccess: (result) => onDone?.(result),
-      onError: () => setNotice(null),
-    })
+  const memberIds = new Set((members.data ?? []).map((m) => m.id))
+  const candidates = (people.data ?? []).filter((p) => !memberIds.has(p.id))
+  const rolesOf = (m) => (m.roles ?? []).filter((r) => r in roleLabels)
+  const toggleRole = (m, role) => {
+    const current = rolesOf(m)
+    setMember.mutate({ personId: m.id, roles: current.includes(role) ? current.filter((r) => r !== role) : [...current, role] })
+  }
 
   const add = (e) => {
     e.preventDefault()
-    run({ action: 'add', email, name }, (result) => {
-      if (result.temporary_password) setHandover({ email: result.member.email, password: result.temporary_password })
-      else setNotice(`${result.member.email} already has a workspace login - they sign in with their own password.`)
-      setEmail('')
-      setName('')
-    })
+    if (adding) setMember.mutate({ personId: adding, roles: [] }, { onSuccess: () => setAdding('') })
   }
-
-  const copy = (text) => navigator.clipboard?.writeText(text)
 
   return (
     <div className="page">
@@ -45,39 +41,23 @@ export default function TeamPage({ me, accountMenu }) {
 
       <section className="team">
         <p className="team-intro">
-          People you add here can sign in to FluidCRM. Each person gets their own private board with the sample deals.
-          Workspace employees who are on this list can also use FluidCRM from WhatsApp, once they connect their phone in the workspace portal.
+          Add the workspace’s employees to FluidCRM. Members see their own deals and the deals of people who report to them;
+          sales managers and admins see every deal. The workspace owner manages employees and who reports to whom in the console.
         </p>
 
-        {handover && (
-          <div className="team-card team-handover">
-            <KeyRound size={18} />
-            <div>
-              <div className="team-card-title">Temporary password for {handover.email}</div>
-              <p className="team-card-text">Give it to them directly - it’s shown only now. They can change it from their account menu.</p>
-              <div className="team-handover-row">
-                <code>{handover.password}</code>
-                <button type="button" className="btn-secondary" onClick={() => copy(handover.password)}><Copy size={14} /> Copy</button>
-                <button type="button" className="btn-secondary" onClick={() => setHandover(null)}>Done</button>
-              </div>
-            </div>
-          </div>
-        )}
-        {notice && <div className="team-card team-notice">{notice}</div>}
-        {action.error && <div className="team-card team-error">{action.error.message}</div>}
+        {setMember.error && <div className="team-card team-error">{setMember.error.message}</div>}
 
         <form className="team-card team-add" onSubmit={add}>
           <div className="team-card-title"><UserPlus size={16} /> Add a person</div>
           <div className="team-add-row">
             <label className="field">
-              <span className="field-label">Email</span>
-              <input type="email" required value={email} onChange={(e) => setEmail(e.target.value)} placeholder="name@company.com" />
+              <span className="field-label">Employee</span>
+              <select value={adding} onChange={(e) => setAdding(e.target.value)}>
+                <option value="">{people.isLoading ? 'Loading…' : candidates.length ? 'Choose someone' : 'Everyone is already a member'}</option>
+                {candidates.map((p) => <option key={p.id} value={p.id}>{p.name}{p.title ? ` · ${p.title}` : ''}</option>)}
+              </select>
             </label>
-            <label className="field">
-              <span className="field-label">Name</span>
-              <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Optional" />
-            </label>
-            <button type="submit" className="btn-primary" disabled={action.isPending}>{action.isPending ? 'Adding…' : 'Add'}</button>
+            <button type="submit" className="btn-primary" disabled={!adding || setMember.isPending}>{setMember.isPending ? 'Adding…' : 'Add'}</button>
           </div>
         </form>
 
@@ -88,42 +68,31 @@ export default function TeamPage({ me, accountMenu }) {
           {members.data?.length === 0 && <p className="field-empty">No members yet.</p>}
           <ul className="member-list">
             {members.data?.map((m) => {
-              const self = m.user_id === me.user_id
+              const self = m.auth_user_id === me.user_id
+              const owner = m.workspace_role === 'owner'
+              const roles = rolesOf(m)
               return (
-                <li key={m.user_id} className={m.status === 'disabled' ? 'is-disabled' : ''}>
-                  <span className="account-avatar">{(m.name || m.email)[0].toUpperCase()}</span>
+                <li key={m.id}>
+                  <span className="account-avatar">{(m.name || m.email || '?')[0].toUpperCase()}</span>
                   <div className="member-text">
                     <span className="member-name">{m.name}{self && ' (you)'}</span>
                     <span className="member-sub">
-                      {m.email} · {m.role === 'admin' ? 'Admin' : 'User'}
-                      {m.status === 'disabled' ? ' · Access paused' : ''}
-                      {!m.created_login && ' · Workspace login'}
+                      {[m.title, owner ? 'Workspace owner' : roles.map((r) => roleLabels[r]).join(', ') || 'Member'].filter(Boolean).join(' · ')}
                     </span>
                   </div>
-                  {!self && (
+                  {!owner && !self && (
                     <div className="member-actions">
-                      <button type="button" className="btn-secondary" disabled={action.isPending} onClick={() => run({ action: 'set_role', user_id: m.user_id, role: m.role === 'admin' ? 'user' : 'admin' })}>
-                        {m.role === 'admin' ? 'Make user' : 'Make admin'}
+                      <button type="button" className="btn-secondary" disabled={setMember.isPending} onClick={() => toggleRole(m, 'sales_manager')}>
+                        {roles.includes('sales_manager') ? 'Not a sales manager' : 'Make sales manager'}
                       </button>
-                      {m.created_login && (
-                        <button
-                          type="button"
-                          className="btn-secondary"
-                          disabled={action.isPending}
-                          onClick={() => window.confirm(`Reset ${m.email}'s password? Their current password stops working.`)
-                            && run({ action: 'reset_password', user_id: m.user_id }, (r) => setHandover({ email: m.email, password: r.temporary_password }))}
-                        >
-                          Reset password
-                        </button>
-                      )}
-                      <button type="button" className="btn-secondary" disabled={action.isPending} onClick={() => run({ action: 'set_status', user_id: m.user_id, status: m.status === 'active' ? 'disabled' : 'active' })}>
-                        {m.status === 'active' ? 'Pause access' : 'Restore access'}
+                      <button type="button" className="btn-secondary" disabled={setMember.isPending} onClick={() => toggleRole(m, 'admin')}>
+                        {roles.includes('admin') ? 'Remove admin' : 'Make admin'}
                       </button>
                       <button
                         type="button"
                         className="btn-ghost-danger"
-                        disabled={action.isPending}
-                        onClick={() => window.confirm(`Remove ${m.email}? They lose access; their board is kept if you add them again.`) && run({ action: 'remove', user_id: m.user_id })}
+                        disabled={setMember.isPending}
+                        onClick={() => window.confirm(`Remove ${m.name} from FluidCRM? Their deals stay; they lose access until you add them again.`) && setMember.mutate({ personId: m.id, active: false })}
                       >
                         Remove
                       </button>

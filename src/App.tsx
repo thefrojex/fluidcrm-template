@@ -5,8 +5,9 @@ import TeamPage from "./crm/TeamPage.jsx";
 import { setMe } from "./crm/lib/me.js";
 import { useAuthUser, useMembership } from "./crm/session.js";
 
-// FluidCRM: sign in (workspace login) → this CRM's member list decides access → each member's own
-// private board. The first person to sign in to a new CRM becomes its admin.
+// FluidCRM: sign in (workspace login) → membership of the CRM (the workspace's, in core) decides
+// access → the board shows their deals and their team's (all deals for its admin, sales managers
+// and the workspace owner).
 
 function Centered({ children }: { children: string }) {
   return (
@@ -26,7 +27,7 @@ function App() {
   if (membership.error) return <Centered>{`Couldn't open FluidCRM: ${membership.error.message}`}</Centered>;
 
   const member = membership.data;
-  if (!member || member.status !== "active") return <NoAccess email={auth.user.email} disabled={member?.status === "disabled"} />;
+  if (!member) return <NoAccess email={auth.user.email} />;
 
   setMe(member.name);
   const accountMenu = <AccountMenu member={member} />;
